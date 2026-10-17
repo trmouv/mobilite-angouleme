@@ -1,3 +1,9 @@
+  const bike=(state.data.bikes||[]).find(b=>b.bikesAvailable>0); if(bike) options.push({kind:'Vélo',icon:'🚲',title:bike.name,subtitle:`${bike.bikesAvailable} vélo${bike.bikesAvailable>1?'s':''} disponible${bike.bikesAvailable>1?'s':''}`,when:`${bike.walkMinutes} min à pied`,leave:bike.walkMinutes,score:bike.walkMinutes+2});
+  const stationWalk=state.extras?.trainStationWalk?.walkMinutes; const firstTrain=state.trains?.departures?.[0]; if(Number.isFinite(stationWalk)&&firstTrain){ const now=Date.now()/1000; const mins=firstTrain.epoch?Math.max(0,Math.round((Number(firstTrain.epoch)-now)/60)):null; if(mins==null||mins>=stationWalk+buffer) options.push({kind:'Train',icon:'🚆',title:`${firstTrain.service||'Train'} · ${firstTrain.destination||''}`,subtitle:`${state.trains?.station || 'Gare la plus proche'} · ${stationWalk} min à pied`,when:trainClockFromDeparture(firstTrain),leave:mins==null?stationWalk:Math.max(0,mins-stationWalk-buffer),score:mins==null?stationWalk+20:Math.max(0,mins-stationWalk-buffer)}); }
+  for(const s of state.extras?.tbm?.stops||[]){ const svc=s.services?.[0],p=svc?.passages?.[0]; if(!p)continue; const leave=p.minutes-s.walkMinutes-buffer; if(leave>=0) options.push({kind:`TBM ${svc.mode||''}`.trim(),icon:svc.mode==='Tram'?'🚊':svc.mode==='Métro'?'🚇':svc.mode==='Bateau'?'⛴️':'🚌',title:`${svc.line||''} · ${svc.destination}`,subtitle:`${s.name} · ${s.walkMinutes} min à pied`,when:p.realtime?(p.minutes===0?'à l’arrêt':p.minutes===1?'proche':`dans ${p.minutes} min`):fmtCoachTime(p.time),leave,score:leave}); }
+  for(const [kind,data,icon] of [['Car interurbain',state.extras?.interurban,'🚌'],['Car longue distance',state.extras?.longDistance,'🧳']]){ for(const s of data?.stops||[]){ const svc=s.services?.[0],p=svc?.passages?.[0]; if(!p)continue; const leave=p.minutes-s.walkMinutes-buffer; if(leave>=0) options.push({kind,icon,title:`${svc.operator||svc.line||kind} · ${svc.destination}`,subtitle:`${s.name} · ${s.walkMinutes} min à pied`,when:fmtCoachTime(p.time),leave,score:leave}); } }
+  options.sort((a,b)=>a.score-b.score); const best=options[0],alt=options.slice(1,4);
+  if(!best){ target.innerHTML='<div class="empty">Aucune option attrapable immédiatement avec les données disponibles.</div>'; return; }
   target.innerHTML=`<article class="best-card"><div class="best-kicker">OPTION RECOMMANDÉE</div><div class="best-main"><div class="best-icon">${best.icon}</div><div><div class="best-kind">${esc(best.kind)}</div><h3>${esc(best.title)}</h3><p>${esc(best.subtitle)}</p></div><div class="best-when">${esc(best.when)}</div></div>${Number.isFinite(best.leave)?`<div class="best-leave">Tu peux partir dans environ <strong>${Math.max(0,Math.round(best.leave))} min</strong></div>`:''}${alt.length?`<div class="alternatives"><span>Alternatives</span>${alt.map(o=>`<div><b>${o.icon} ${esc(o.kind)}</b><small>${esc(o.title)} · ${esc(o.when)}</small></div>`).join('')}</div>`:''}</article>`;
 }
 
@@ -73,40 +79,3 @@ $('#refresh').addEventListener('click',()=>loadMobility().catch(e=>setStatus(e.m
 $('#openSettings').addEventListener('click',openSettings);
 $('#closeSettings').addEventListener('click',closeSettings);
 $('#settingsBackdrop').addEventListener('click',closeSettings);
-document.addEventListener('keydown',e=>{ if(e.key==='Escape') closeSettings(); });
-$('#themeToggle').addEventListener('click',()=>applyTheme(document.documentElement.dataset.theme === 'dark' ? 'light' : 'dark'));
-$('#speed').addEventListener('change',()=>{ localStorage.setItem('walkSpeed',$('#speed').value); loadMobility().catch(e=>setStatus(e.message,true)); });
-$('#buffer').addEventListener('change',()=>{ localStorage.setItem('busBuffer',$('#buffer').value); render(); });
-$('#busRadius').addEventListener('input',()=>{ $('#busRadiusValue').textContent=$('#busRadius').value; });
-$('#busRadius').addEventListener('change',()=>{ localStorage.setItem('busWalkRadius',$('#busRadius').value); loadMobility().catch(e=>setStatus(e.message,true)); });
-$('#bikeRadius').addEventListener('input',()=>{ $('#bikeRadiusValue').textContent=$('#bikeRadius').value; });
-$('#bikeRadius').addEventListener('change',()=>{ localStorage.setItem('bikeWalkRadius',$('#bikeRadius').value); loadMobility().catch(e=>setStatus(e.message,true)); });
-
-const radiusSettings=[
-  ['#interurbanRadius','#interurbanRadiusValue','interurbanWalkRadius','10'],
-  ['#longDistanceRadius','#longDistanceRadiusValue','longDistanceWalkRadius','15'],
-  ['#carpoolRadius','#carpoolRadiusValue','carpoolWalkRadius','15'],
-  ['#parkingRadius','#parkingRadiusValue','parkingWalkRadius','15'],
-  ['#chargingRadius','#chargingRadiusValue','chargingWalkRadius','15']
-];
-for(const [sel,label,key] of radiusSettings){
-  $(sel)?.addEventListener('input',()=>{$(label).textContent=$(sel).value;});
-  $(sel)?.addEventListener('change',()=>{localStorage.setItem(key,$(sel).value); state.extras=null; loadExtras().catch(()=>{});});
-}
-
-$('#buses').addEventListener('click', async e => {
-  const disruptionBtn = e.target.closest('.disruption-toggle');
-  if (disruptionBtn) {
-    const details = disruptionBtn.nextElementSibling;
-    const isOpen = disruptionBtn.getAttribute('aria-expanded') === 'true';
-    disruptionBtn.setAttribute('aria-expanded', String(!isOpen));
-    details.hidden = isOpen;
-    if (!isOpen && !details.dataset.loaded) {
-      details.innerHTML = '<div class="disruption-loading">Chargement des informations…</div>';
-      try {
-        const alerts = JSON.parse(disruptionBtn.dataset.alerts || '[]');
-        const blocks = await Promise.all(alerts.map(async alert => {
-          try {
-            const r = await fetch(`/api/traffic-detail?url=${encodeURIComponent(alert.url)}`);
-            const j = await r.json();
-            if (!r.ok) throw new Error(j.error || 'Détail indisponible');
