@@ -1,0 +1,60 @@
+            return `<article class="disruption-item"><h4>${esc(j.title || alert.title)}</h4><div class="disruption-text">${esc(j.detail || '').replace(/\n/g,'<br>')}</div><a href="${escAttr(j.url || alert.url)}" target="_blank" rel="noopener noreferrer">Voir l’information officielle ↗</a></article>`;
+          } catch {
+            return `<article class="disruption-item"><h4>${esc(alert.title)}</h4><a href="${escAttr(alert.url)}" target="_blank" rel="noopener noreferrer">Voir l’information officielle ↗</a></article>`;
+          }
+        }));
+        details.innerHTML = blocks.join('');
+        details.dataset.loaded = '1';
+      } catch {
+        details.innerHTML = '<div class="disruption-loading">Informations détaillées indisponibles.</div>';
+      }
+    }
+    return;
+  }
+
+  const directionBtn = e.target.closest('.direction-toggle');
+  if (directionBtn) {
+    const stopId = directionBtn.dataset.stopId;
+    const stop = state.data?.busStops?.find(s => s.id === stopId);
+    if (!stop?.directions?.length) return;
+    const current = Number(state.stopDirections[stopId] ?? 0);
+    state.stopDirections[stopId] = (current + 1) % stop.directions.length;
+    render();
+    return;
+  }
+});
+
+(async function boot(){
+  applyTheme(localStorage.getItem('theme') || (matchMedia('(prefers-color-scheme: dark)').matches ? 'dark' : 'light'));
+  $('#speed').value = localStorage.getItem('walkSpeed') || '4.8';
+  $('#buffer').value = localStorage.getItem('busBuffer') || '2';
+  const legacyRadius = localStorage.getItem('walkRadius') || '10';
+  $('#busRadius').value = localStorage.getItem('busWalkRadius') || legacyRadius;
+  $('#bikeRadius').value = localStorage.getItem('bikeWalkRadius') || legacyRadius;
+  $('#busRadiusValue').textContent = $('#busRadius').value;
+  $('#bikeRadiusValue').textContent = $('#bikeRadius').value;
+  for(const [sel,label,key,fallback] of radiusSettings){ $(sel).value=localStorage.getItem(key)||fallback; $(label).textContent=$(sel).value; }
+  const storedAddress = localStorage.getItem('homeAddress') || DEFAULT_ADDRESS;
+  $('#address').value = storedAddress;
+  try{
+    const storedPoint = JSON.parse(localStorage.getItem('homePoint') || 'null');
+    if(storedPoint?.lat && storedPoint?.lon){
+      state.home = storedPoint;
+      $('#geocodeState').textContent = `Adresse enregistrée : ${storedPoint.label}`;
+      await loadMobility();
+    } else await useAddress();
+  }catch(e){ setStatus(e.message,true); }
+  setInterval(()=>loadMobility().catch(()=>{}),30000);
+})();
+
+let deferredInstallPrompt = null;
+window.addEventListener('beforeinstallprompt', e => {
+  e.preventDefault(); deferredInstallPrompt = e; $('#installApp').classList.remove('install-hidden');
+});
+$('#installApp')?.addEventListener('click', async () => {
+  if (!deferredInstallPrompt) return;
+  deferredInstallPrompt.prompt(); await deferredInstallPrompt.userChoice;
+  deferredInstallPrompt = null; $('#installApp').classList.add('install-hidden');
+});
+window.addEventListener('appinstalled', () => { deferredInstallPrompt = null; $('#installApp')?.classList.add('install-hidden'); });
+if ('serviceWorker' in navigator) window.addEventListener('load', () => navigator.serviceWorker.register('/sw.js').catch(() => {}));

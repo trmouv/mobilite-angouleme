@@ -1,7 +1,7 @@
 {
   "name": "Mobilité Angoulême",
   "short_name": "Mobilité",
-  "description": "Bus Möbius, vélos Modalis et heure idéale de départ autour de chez moi.",
+  "description": "Transports urbains, trains, cars, vélos et services de mobilité autour de moi.",
   "start_url": "/",
   "scope": "/",
   "display": "standalone",

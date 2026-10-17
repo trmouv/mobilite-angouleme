@@ -1,0 +1,148 @@
+const $ = s => document.querySelector(s);
+const state = { home: null, data: null, trains: null, extras: null, extrasLoading: false, stopDirections: {} };
+const DEFAULT_ADDRESS = '165 avenue Gambetta 16000 Angoulême';
+
+function fmtDistance(m){ return m < 1000 ? `${m} m` : `${(m/1000).toFixed(1)} km`; }
+function leaveClock(arrival, walkMin, bufferMin){
+  const d = new Date();
+  if (arrival.epoch) d.setTime(arrival.epoch * 1000);
+  else d.setTime(Date.now() + arrival.minutes * 60000);
+  d.setMinutes(d.getMinutes() - walkMin - bufferMin);
+  return d.toLocaleTimeString('fr-FR',{hour:'2-digit',minute:'2-digit'});
+}
+function setStatus(t, error=false){ $('#status').textContent=t; $('#status').classList.toggle('error',error); }
+function getBusRadius(){ return Number($('#busRadius').value || 10); }
+function getBikeRadius(){ return Number($('#bikeRadius').value || 10); }
+function getRadius(id, fallback){ return Number($(id)?.value || fallback); }
+
+function groupRouteRows(rows=[]){
+  // Conserve l'ordre de première apparition des lignes. Si une même ligne
+  // dessert plusieurs destinations, elle garde son emplacement d'origine et
+  // chaque destination reste affichée séparément avec ses propres passages.
+  const grouped = new Map();
+  for (const row of rows) {
+    const key = String(row.route ?? '').trim().toUpperCase();
+    if (!grouped.has(key)) {
+      grouped.set(key, { ...row, directions: [], disruptions: [...(row.disruptions || [])] });
+    }
+    const target = grouped.get(key);
+    for (const disruption of row.disruptions || []) {
+      if (!target.disruptions.some(x => x.id === disruption.id)) target.disruptions.push(disruption);
+    }
+    const headsign = String(row.headsign ?? '').trim();
+    let direction = target.directions.find(d => d.headsign === headsign);
+    if (!direction) {
+      direction = { headsign, passages: [] };
+      target.directions.push(direction);
+    }
+    for (const p of row.passages || []) {
+      const dedupeKey = `${p.epoch || ''}|${p.time || ''}|${p.minutes ?? ''}|${p.realtime ? 1 : 0}`;
+      if (!direction.passages.some(x => x._key === dedupeKey)) {
+        direction.passages.push({ ...p, _key: dedupeKey });
+      }
+    }
+    if (!target.color && row.color) target.color = row.color;
+  }
+
+  return [...grouped.values()].map(row => {
+    row.directions = row.directions.map(direction => {
+      direction.passages.sort((a,b) => {
+        if (a.epoch && b.epoch) return a.epoch - b.epoch;
+        return Number(a.minutes ?? 99999) - Number(b.minutes ?? 99999);
+      });
+      direction.passages = direction.passages.slice(0,3).map(({_key,...p})=>p);
+      return direction;
+    });
+    delete row.headsign;
+    delete row.passages;
+    return row;
+  });
+}
+
+function applyTheme(theme){
+  const resolved = theme === 'dark' ? 'dark' : 'light';
+  document.documentElement.dataset.theme = resolved;
+  localStorage.setItem('theme', resolved);
+  $('#themeToggle').textContent = resolved === 'dark' ? '🌙' : '☀️';
+  $('#themeToggle').setAttribute('aria-label', resolved === 'dark' ? 'Activer le mode clair' : 'Activer le mode nuit');
+  document.querySelector('meta[name="theme-color"]').setAttribute('content', resolved === 'dark' ? '#0f172a' : '#f4f6f8');
+}
+
+function openSettings(){
+  $('#settingsBackdrop').hidden = false;
+  requestAnimationFrame(()=> $('#settingsBackdrop').classList.add('show'));
+  $('#settingsPanel').classList.add('open');
+  $('#settingsPanel').setAttribute('aria-hidden','false');
+  document.body.classList.add('drawer-open');
+  setTimeout(()=>$('#address').focus(),150);
+}
+function closeSettings(){
+  $('#settingsBackdrop').classList.remove('show');
+  $('#settingsPanel').classList.remove('open');
+  $('#settingsPanel').setAttribute('aria-hidden','true');
+  document.body.classList.remove('drawer-open');
+  setTimeout(()=>{ $('#settingsBackdrop').hidden = true; },220);
+}
+
+async function geocode(address){
+  const r = await fetch(`/api/geocode?q=${encodeURIComponent(address)}`);
+  const j = await r.json();
+  if(!r.ok || !j.results?.length) throw new Error(j.error || 'Adresse introuvable');
+  return j.results[0];
+}
+
+async function reverseGeocode(lat, lon){
+  try{
+    const r = await fetch(`/api/reverse-geocode?lat=${encodeURIComponent(lat)}&lon=${encodeURIComponent(lon)}`);
+    const j = await r.json();
+    if(r.ok && j.result) return j.result;
+  }catch{}
+  return { lat, lon, label: `Position actuelle (${lat.toFixed(5)}, ${lon.toFixed(5)})` };
+}
+
+async function loadMobility(){
+  if(!state.home) return;
+  setStatus('Actualisation des mobilités à proximité…');
+  const speed = $('#speed').value;
+  const busRadius = getBusRadius();
+  const bikeRadius = getBikeRadius();
+  const url = `/api/mobility?lat=${state.home.lat}&lon=${state.home.lon}&speedKmh=${speed}&maxBusWalkMin=${busRadius}&maxBikeWalkMin=${bikeRadius}&bikeLimit=4`;
+  const [mobilityResult, trainsResult] = await Promise.allSettled([
+    fetch(url).then(async r => { const j = await r.json(); if(!r.ok) throw new Error(j.error || 'Données mobilité indisponibles'); return j; }),
+    fetch(`/api/trains?limit=28&lat=${encodeURIComponent(state.home.lat)}&lon=${encodeURIComponent(state.home.lon)}&speedKmh=${encodeURIComponent(speed)}`).then(async r => { const j = await r.json(); if(!r.ok) throw new Error(j.error || 'Horaires SNCF indisponibles'); return j; })
+  ]);
+  if (mobilityResult.status === 'rejected') throw mobilityResult.reason;
+  state.data = mobilityResult.value;
+  state.trains = trainsResult.status === 'fulfilled' ? trainsResult.value : { error: trainsResult.reason?.message || 'Horaires SNCF indisponibles', departures: [] };
+  render();
+  const t = new Date(state.data.generatedAt).toLocaleTimeString('fr-FR',{hour:'2-digit',minute:'2-digit',second:'2-digit'});
+  setStatus(`Mis à jour à ${t} · ${state.home.label}${trainsResult.status === 'rejected' ? ' · trains temporairement indisponibles' : ''}`);
+  loadExtras().catch(()=>{});
+}
+
+async function loadExtras(){
+  if(!state.home || state.extrasLoading) return;
+  state.extrasLoading = true;
+  renderSupplementary();
+  try{
+    const q = new URLSearchParams({
+      lat:state.home.lat, lon:state.home.lon, speedKmh:$('#speed').value,
+      interurbanRadius:getRadius('#interurbanRadius',10),
+      longDistanceRadius:getRadius('#longDistanceRadius',15),
+      carpoolRadius:getRadius('#carpoolRadius',15),
+      parkingRadius:getRadius('#parkingRadius',15),
+      chargingRadius:getRadius('#chargingRadius',15),
+      busRadius:getBusRadius(), bikeRadius:getBikeRadius(),
+      locality:state.home.label||''
+    });
+    const r=await fetch(`/api/extras?${q}`); const j=await r.json();
+    if(!r.ok) throw new Error(j.error || 'Données complémentaires indisponibles');
+    state.extras=j;
+  }catch(e){ state.extras={errors:{global:e.message}}; }
+  finally{ state.extrasLoading=false; renderSupplementary(); renderBestOption(); }
+}
+
+function render(){
+  const buffer = Number($('#buffer').value);
+  const busRadius = getBusRadius();
+  const bikeRadius = getBikeRadius();

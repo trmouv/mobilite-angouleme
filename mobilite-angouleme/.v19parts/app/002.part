@@ -1,0 +1,82 @@
+  $('#busRadiusValue').textContent = busRadius;
+  $('#bikeRadiusValue').textContent = bikeRadius;
+  $('#bikeRadiusLabel').textContent = `4 stations max · ≤ ${bikeRadius} min`;
+
+  const bikes = [...(state.data?.bikes || [])].sort((a,b)=>a.distanceMeters-b.distanceMeters).slice(0,4);
+  $('#bikes').innerHTML = bikes.length ? bikes.map((b,i)=>`
+    <article class="card">
+      <span class="rank">#${i+1} · ${b.walkMinutes} min à pied · ${fmtDistance(b.distanceMeters)}</span>
+      <h3>${esc(b.name)}</h3>${b.network ? `<p class="card-note">${esc(b.network)}</p>` : ''}
+      <div class="bike-numbers">
+        <div class="metric"><b>${b.bikesAvailable}</b><span>vélo${b.bikesAvailable>1?'s':''} disponible${b.bikesAvailable>1?'s':''}</span></div>
+        <div class="metric"><b>${b.docksAvailable}</b><span>place${b.docksAvailable>1?'s':''} libre${b.docksAvailable>1?'s':''}</span></div>
+      </div>
+    </article>`).join('') : `<div class="empty">Aucune station vélo trouvée dans le rayon de ${bikeRadius} minutes à pied.</div>`;
+
+  renderUrbanTransit();
+
+  const trainData = state.trains;
+  const trains = trainData?.departures || [];
+  if ($('#trainTitle')) $('#trainTitle').textContent = `Prochains trains au départ de ${trainData?.station || 'la gare la plus proche'}`;
+  const trainGroups = [];
+  const trainGroupMap = new Map();
+  for (const t of trains) {
+    const type = t.service || 'Train';
+    const destination = t.destination || 'Destination non précisée';
+    const key = `${type}||${destination}`;
+    if (!trainGroupMap.has(key)) {
+      const group = { type, destination, color: t.color, departures: [] };
+      trainGroupMap.set(key, group);
+      trainGroups.push(group);
+    }
+    const group = trainGroupMap.get(key);
+    if (group.departures.length < 4) group.departures.push(t);
+  }
+
+  $('#trainCount').textContent = trainGroups.length ? `${trainGroups.length} direction${trainGroups.length>1?'s':''}` : 'SNCF · prochains départs';
+  $('#trains').innerHTML = trainData?.error
+    ? `<div class="empty">${esc(trainData.error)}</div>`
+    : trainGroups.length ? trainGroups.map(group=>{
+        const [first, ...next] = group.departures;
+        const logo = trainLogoForService(group.type);
+        const firstClock = trainClockFromDeparture(first);
+        const delay = Number(first.delayMinutes || 0);
+        const following = next.slice(0,3).map(t => `<span class="train-next-time">${esc(trainClockFromDeparture(t))}</span>`).join('');
+        return `<div class="train-row">
+          <div class="train-service" ${group.color ? `style="border-color:#${safeColor(group.color)}"` : ''}>
+            ${logo ? `<img class="train-logo" src="${escAttr(logo.src)}" alt="${escAttr(logo.alt)}">` : `<strong>${esc(group.type)}</strong>`}
+          </div>
+          <div class="train-main">
+            <div class="train-route">
+              <div class="train-destination">${esc(group.destination)}</div>
+              <div class="train-times">
+                <span class="train-time">
+                  <strong>${esc(firstClock)}</strong>
+                </span>
+                ${delay > 0 ? `<span class="train-delay">+${delay} min de retard</span>` : ''}
+                ${first.platform ? `<span class="train-platform">Voie ${esc(first.platform)}</span>` : ''}
+                ${following}
+              </div>
+            </div>
+          </div>
+        </div>`;
+      }).join('')
+    : '<div class="empty">Aucun départ SNCF trouvé dans les prochaines heures.</div>';
+  renderSupplementary();
+  renderBestOption();
+}
+
+
+function renderMobiusStopCard(s,i,buffer){
+  const directions=s.directions?.length?s.directions:[{id:`${s.id}:default`,label:'Direction',routeDirections:s.routeDirections||[]}];
+  let selected=Number(state.stopDirections[s.id]??0); if(!Number.isInteger(selected)||selected<0||selected>=directions.length)selected=0; state.stopDirections[s.id]=selected;
+  const direction=directions[selected],rows=groupRouteRows(direction.routeDirections||[]),futureRows=groupRouteRows(direction.futureRouteDirections||[]),canSwitch=directions.length>1;
+  const rowsHtml=rows.length?rows.map(r=>`<div class="arrival route-row"><div class="route" ${r.color?`style="background:#${safeColor(r.color)}"`:''}>${esc(r.route)}</div><div class="route-main">${r.disruptions?.length?`<button class="disruption-toggle" type="button" data-route="${esc(r.route)}" data-alerts='${escAttr(JSON.stringify(r.disruptions))}' aria-expanded="false"><span class="disruption-icon" aria-hidden="true">!</span><span>Perturbations</span></button><div class="disruption-details" hidden></div>`:''}${r.directions.map((d,di)=>{const passages=d.passages.slice(0,3);return `<div class="route-direction ${di?'route-direction-next':''}"><div class="headsign">${esc(d.headsign)}</div><div class="passage-list">${passages.map((p,idx)=>p.realtime?`<span class="passage realtime-passage"><span class="live-dot" aria-label="Donnée actualisée"></span><strong>${p.minutes===0?'à l’arrêt':p.minutes===1?'proche':idx===0?`dans ${p.minutes} min`:`${p.minutes} min`}</strong></span>`:`<span class="passage scheduled-passage"><strong>${esc(p.time)}</strong></span>`).join('')}</div>${passages[0]?.realtime?`<div class="leave-advice">Départ conseillé : <strong>${leaveClock(passages[0],s.walkMinutes,buffer)}</strong></div>`:''}</div>`}).join('')}</div></div>`).join(''):futureRows.length?`<div class="future-window">${futureRows.map(r=>`<div class="arrival route-row future-arrival"><div class="route" ${r.color?`style="background:#${safeColor(r.color)}"`:''}>${esc(r.route)}</div><div class="route-main">${r.directions.map((d,di)=>`<div class="route-direction ${di?'route-direction-next':''}"><div class="headsign">${esc(d.headsign)}</div><div class="passage-list">${d.passages.slice(0,3).map(p=>`<span class="passage scheduled-passage"><strong>${esc(p.time)}</strong></span>`).join('')}</div></div>`).join('')}</div></div>`).join('')}</div>`:'<div class="empty">Aucun passage prévu dans les 6 prochaines heures pour cette direction.</div>';
+  return `<article class="bus-card" data-distance="${s.distanceMeters}"><div class="bus-head"><div class="stop-title-wrap"><span class="rank">#${i+1} · ${fmtDistance(s.distanceMeters)} · Möbius</span><div class="stop-title-row"><h3>${esc(s.name)}</h3>${canSwitch?`<button class="direction-toggle" type="button" data-stop-id="${esc(s.id)}" aria-label="Changer la direction à ${esc(s.name)}">↔ Direction</button>`:''}</div><div class="direction-label">${esc(direction.label)}${canSwitch?` <span>${selected+1}/${directions.length}</span>`:''}</div></div><div class="walk">🚶 ${s.walkMinutes} min</div></div><div class="arrivals">${rowsHtml}</div></article>`;
+}
+function groupTbmServices(services=[]){
+  const groups = new Map();
+  for (const service of services) {
+    const mode = String(service.mode || 'Transport').trim();
+    const line = String(service.line || '').trim();
+    const key = `${mode.toUpperCase()}|${line.toUpperCase()}`;

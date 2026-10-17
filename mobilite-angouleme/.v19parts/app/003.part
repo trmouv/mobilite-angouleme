@@ -1,0 +1,81 @@
+    if (!groups.has(key)) groups.set(key, { mode, line, color: service.color || '', destinations: [], alerts: [] });
+    const group = groups.get(key);
+    if (!group.color && service.color) group.color = service.color;
+    for (const alert of service.alerts || []) if (!group.alerts.includes(alert)) group.alerts.push(alert);
+    const destination = String(service.destination || 'Destination non précisée').trim();
+    let dir = group.destinations.find(d => d.destination === destination);
+    if (!dir) { dir = { destination, passages: [], alerts: [] }; group.destinations.push(dir); }
+    for (const alert of service.alerts || []) if (!dir.alerts.includes(alert)) dir.alerts.push(alert);
+    for (const p of service.passages || []) {
+      const k = `${p.epoch || ''}|${p.time || ''}|${p.minutes ?? ''}|${p.realtime ? 1 : 0}`;
+      if (!dir.passages.some(x => x._key === k)) dir.passages.push({ ...p, _key:k });
+    }
+  }
+  return [...groups.values()].map(group => {
+    group.destinations = group.destinations.map(dir => {
+      dir.passages.sort((a,b) => {
+        if (a.epoch && b.epoch) return a.epoch - b.epoch;
+        return Number(a.minutes ?? 99999) - Number(b.minutes ?? 99999);
+      });
+      dir.passages = dir.passages.slice(0,3).map(({_key,...p}) => p);
+      return dir;
+    });
+    return group;
+  });
+}
+
+function renderTbmStopCard(s,i){
+  const groups = groupTbmServices(s.services || []);
+  return `<article class="bus-card compact-card" data-distance="${s.distanceMeters}"><div class="bus-head"><div><span class="rank">#${i+1} · ${fmtDistance(s.distanceMeters)} · TBM</span><h3>${esc(s.name)}</h3></div><div class="walk">🚶 ${s.walkMinutes} min</div></div><div class="service-list">${groups.slice(0,12).map(v=>`<div class="service-row"><div class="service-badge tbm-${String(v.mode||'bus').toLowerCase().replace('³','3').replace('é','e')}">${esc(v.mode||'Transport')} ${esc(v.line||'')}</div><div class="service-main">${v.destinations.map((d,di)=>`<div class="service-direction ${di?'service-direction-next':''}"><div class="service-destination">${esc(d.destination)}</div><div class="service-times">${(d.passages||[]).slice(0,3).map((p,idx)=>`<span class="${p.realtime?'time-live':''}">${p.realtime?(p.minutes===0?'à l’arrêt':p.minutes===1?'proche':idx===0?`dans ${p.minutes} min`:`${p.minutes} min`):esc(fmtCoachTime(p.time))}</span>`).join('')}</div>${d.alerts?.length?`<div class="source-note danger-note">Perturbations : ${esc(d.alerts[0])}</div>`:''}</div>`).join('')}</div></div>`).join('')}</div></article>`;
+}
+
+function renderUrbanTransit(){
+  const target=$('#buses'); if(!target)return; const radius=getBusRadius(),buffer=Number($('#buffer').value||2);
+  const mob=(state.data?.busStops||[]).map(s=>({kind:'mobius',s}));
+  const tbm=(state.extras?.tbm?.stops||[]).map(s=>({kind:'tbm',s}));
+  const all=[...mob,...tbm].sort((a,b)=>a.s.distanceMeters-b.s.distanceMeters);
+  const isServed=x=>x.kind==='tbm' ? ((x.s.services||[]).length>0) : (x.s.served!==false && (x.s.directions||[]).some(d=>(d.routeDirections||[]).length||(d.futureRouteDirections||[]).length));
+  const served=all.filter(isServed), unserved=all.filter(x=>!isServed(x));
+  $('#busCount').textContent=`${served.length} desservi${served.length>1?'s':''}${unserved.length?` · ${unserved.length} non desservi${unserved.length>1?'s':''}`:''} · ≤ ${radius} min`;
+  const servedHtml=served.map((x,i)=>x.kind==='mobius'?renderMobiusStopCard(x.s,i,buffer):renderTbmStopCard(x.s,i)).join('');
+  const unservedHtml=unserved.length?`<details class="unserved-group"><summary>Arrêts sans passage prévu actuellement <span>${unserved.length}</span></summary><div class="unserved-list">${unserved.map((x,i)=>`<div class="unserved-stop"><div><strong>${esc(x.s.name)}</strong><span>${x.kind==='tbm'?'TBM':'Möbius'} · ${fmtDistance(x.s.distanceMeters)}</span></div><div class="walk">🚶 ${x.s.walkMinutes} min</div></div>`).join('')}</div></details>`:'';
+  target.innerHTML=(servedHtml||unservedHtml)?`${servedHtml}${unservedHtml}`:`<div class="empty">Aucun arrêt de transport urbain trouvé dans le rayon de ${radius} minutes à pied.</div>${sourceError('tbm')}`;
+}
+
+function fmtCoachTime(t=''){
+  const m=String(t).match(/^(\d{1,2}):(\d{2})/); return m ? `${String(Number(m[1])%24).padStart(2,'0')}h${m[2]}` : String(t);
+}
+function renderTransitStops(stops=[], emptyText='Aucun départ trouvé dans ce rayon.'){
+  if(!stops.length) return `<div class="empty">${esc(emptyText)}</div>`;
+  return stops.map((s,i)=>`<article class="bus-card compact-card">
+    <div class="bus-head"><div><span class="rank">#${i+1} · ${fmtDistance(s.distanceMeters)}</span><h3>${esc(s.name)}</h3></div><div class="walk">🚶 ${s.walkMinutes} min</div></div>
+    <div class="service-list">${(s.services||[]).slice(0,8).map(x=>`<div class="service-row">
+      <div class="service-badge ${operatorClass(x.operator)}">${esc(x.operator||x.line||'Car')}</div>
+      <div class="service-main"><div class="service-destination">${x.line && String(x.line).trim().toLowerCase()!==String(x.operator||'').trim().toLowerCase() ? `<span class="line-code">${esc(x.line)}</span> `:''}${esc(x.destination)}</div>
+      <div class="service-times">${(x.passages||[]).slice(0,4).map(p=>`<span>${esc(fmtCoachTime(p.time))}</span>`).join('')}</div></div>
+    </div>`).join('')}</div>
+  </article>`).join('');
+}
+function operatorClass(op=''){
+  const s=String(op).toLowerCase(); if(s.includes('flix')) return 'op-flix'; if(s.includes('blabla')) return 'op-blabla'; if(s.includes('région')||s.includes('region')) return 'op-region'; return '';
+}
+function statusLabel(raw=''){
+  const s=String(raw).toLowerCase();
+  if(/available|disponible|libre|operative|operational/.test(s)) return 'Disponible';
+  if(/occupied|occupe|busy/.test(s)) return 'Occupée';
+  if(/out|indisponible|hors|fault|maintenance/.test(s)) return 'Indisponible';
+  return raw;
+}
+function sourceError(name){ return state.extras?.errors?.[name] ? `<div class="source-note">Source temporairement indisponible : ${esc(state.extras.errors[name])}</div>` : ''; }
+
+function renderSupplementary(){
+  const loading = state.extrasLoading && !state.extras;
+  if(loading){
+    for(const id of ['tad','interurban','longDistance','carpool','parking','charging']) if($("#"+id)) $("#"+id).innerHTML='<div class="empty">Chargement des données publiques…</div>';
+    return;
+  }
+  const x=state.extras||{};
+  const tad=x.tad;
+  const locality=tad?.locality||x.locality||'votre secteur';
+  if($('#tadTitle')) $('#tadTitle').textContent=`Transport à la demande à ${locality}`;
+  if($('#tadLabel')) $('#tadLabel').textContent=tad?.provider||'sur réservation';

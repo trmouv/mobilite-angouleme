@@ -1,0 +1,148 @@
+// ---------------------------------------------------------------------------
+// Sources complémentaires v15 : cars, TAD, covoiturage, parkings/P+R, IRVE
+// Les URL de ressources ne sont pas figées : elles sont découvertes via l'API
+// publique du Point d'Accès National transport.data.gouv.fr, avec possibilité
+// de surcharge par variables d'environnement pour faciliter l'exploitation.
+// ---------------------------------------------------------------------------
+const PAN_DATASETS_API = 'https://transport.data.gouv.fr/api/datasets';
+const TAD_ANGOULEME_URL = 'https://www.stga.fr/content/mon-transport-%C3%A0-la-demande';
+const TAD_BORDEAUX_URL = 'https://www.infotbm.com/fr/flex_gare_et_flex_aero.html';
+const PAN_CATALOG_TTL = 60 * 60 * 1000;
+const EXTRA_STATIC_TTL = 6 * 60 * 60 * 1000;
+const EXTRA_LIGHT_TTL = 30 * 60 * 1000;
+let panCatalogCache = { loadedAt: 0, datasets: [] };
+const genericGtfsCaches = new Map();
+let parkingCache = { loadedAt: 0, rows: [] };
+let carpoolCache = { loadedAt: 0, rows: [] };
+let tadCache = { loadedAt: 0, value: null };
+const irveQueryCache = new Map();
+
+function deepArrays(value, out = []) {
+  if (Array.isArray(value)) {
+    if (value.some(v => v && typeof v === 'object')) out.push(value);
+    for (const v of value) deepArrays(v, out);
+  } else if (value && typeof value === 'object') {
+    for (const v of Object.values(value)) deepArrays(v, out);
+  }
+  return out;
+}
+
+async function panDatasets() {
+  if (panCatalogCache.datasets.length && Date.now() - panCatalogCache.loadedAt < PAN_CATALOG_TTL) return panCatalogCache.datasets;
+  const r = await fetchOk(PAN_DATASETS_API);
+  const payload = await r.json();
+  const arrays = deepArrays(payload);
+  const candidate = arrays.sort((a,b)=>b.length-a.length).find(arr => arr.some(x => x && typeof x === 'object' && (x.title || x.name || x.slug || x.resources))) || [];
+  panCatalogCache = { loadedAt: Date.now(), datasets: candidate };
+  return candidate;
+}
+
+function datasetLabel(ds={}) {
+  return [ds.title, ds.name, ds.slug, ds.dataset_title].filter(Boolean).join(' ');
+}
+function resourceLabel(r={}) {
+  return [r.title, r.name, r.filename, r.format, r.resource_type, r.type, r.description].filter(Boolean).join(' ');
+}
+function resourceUrl(r={}) {
+  return r.url || r.original_url || r.latest_url || r.href || r.download_url || r.file_url || r.link || '';
+}
+function datasetResources(ds={}) {
+  const arrays = deepArrays(ds);
+  const all = [];
+  for (const arr of arrays) for (const x of arr) {
+    if (x && typeof x === 'object' && resourceUrl(x)) all.push(x);
+  }
+  if (Array.isArray(ds.resources)) all.push(...ds.resources.filter(x=>x && resourceUrl(x)));
+  return [...new Map(all.map(r=>[resourceUrl(r),r])).values()];
+}
+
+async function discoverPanResource({ datasetIncludes=[], resourceIncludes=[], resourceExcludes=[], formats=[], envUrl='' }) {
+  if (envUrl && process.env[envUrl]) return process.env[envUrl];
+  const datasets = await panDatasets();
+  const dsNeedles = datasetIncludes.map(normalizeText);
+  const candidates = datasets.filter(ds => {
+    const label = normalizeText(datasetLabel(ds));
+    return dsNeedles.every(n => label.includes(n));
+  });
+  const rsNeedles = resourceIncludes.map(normalizeText);
+  const rsExcludes = resourceExcludes.map(normalizeText);
+  const formatSet = new Set(formats.map(x=>normalizeText(x)));
+  const scored = [];
+  for (const ds of candidates) {
+    for (const r of datasetResources(ds)) {
+      const label = normalizeText(resourceLabel(r));
+      const fmt = normalizeText(r.format || r.type || '');
+      if (formatSet.size && ![...formatSet].some(f => fmt.includes(f) || label.includes(f))) continue;
+      if (rsNeedles.length && !rsNeedles.every(n => label.includes(n))) continue;
+      if (rsExcludes.some(n => label.includes(n))) continue;
+      let score = 0;
+      if (/temps reel|real time|dynamic|dynamique/.test(label)) score += 4;
+      if (/histor|archive|previous/.test(label)) score -= 5;
+      if (/gtfs|csv|geojson|siri/.test(label)) score += 1;
+      scored.push({ url: resourceUrl(r), score, label, r });
+    }
+  }
+  scored.sort((a,b)=>b.score-a.score);
+  return scored[0]?.url || '';
+}
+
+async function streamCsvUrl(url, onRow) {
+  const r = await fetchOk(url, { redirect:'follow' });
+  if (!r.body) throw new Error('Flux CSV vide');
+  const parser = parseCsvStream({ columns:true, bom:true, skip_empty_lines:true, relax_column_count:true, relax_quotes:true });
+  const input = Readable.fromWeb(r.body);
+  input.pipe(parser);
+  for await (const row of parser) await onRow(row);
+}
+
+function firstField(row, names) {
+  for (const n of names) {
+    if (row[n] != null && String(row[n]).trim() !== '') return row[n];
+    const found = Object.keys(row).find(k => normalizeText(k) === normalizeText(n));
+    if (found && row[found] != null && String(row[found]).trim() !== '') return row[found];
+  }
+  return '';
+}
+function parseNum(v) {
+  if (typeof v === 'number') return Number.isFinite(v) ? v : NaN;
+  const raw = String(v ?? '').trim();
+  if (!raw) return NaN;
+  const n = Number(raw.replace(',','.').replace(/[^0-9+-.]/g,''));
+  return Number.isFinite(n) ? n : NaN;
+}
+function rowCoords(row) {
+  let lat = parseNum(firstField(row, ['latitude','lat','ylat','y_lat','coord_lat','consolidated_latitude']));
+  let lon = parseNum(firstField(row, ['longitude','lon','lng','xlong','x_lon','coord_lon','consolidated_longitude']));
+  if ((!Number.isFinite(lat) || !Number.isFinite(lon))) {
+    const raw = String(firstField(row, ['coordonneesXY','coordonneesxy','coordinates','geo_point_2d','geometry']));
+    const nums = raw.match(/-?\d+(?:[.,]\d+)?/g)?.map(parseNum) || [];
+    if (nums.length >= 2) {
+      // Schéma IRVE coordonneesXY : [longitude, latitude]
+      if (Math.abs(nums[0]) <= 10 && Math.abs(nums[1]) >= 40) { lon = nums[0]; lat = nums[1]; }
+      else if (Math.abs(nums[1]) <= 10 && Math.abs(nums[0]) >= 40) { lat = nums[0]; lon = nums[1]; }
+    }
+  }
+  return { lat, lon };
+}
+
+function genericActiveServices(gtfs, now = new Date()) {
+  const { ymd, weekday } = parisParts(now);
+  const weekdayMap = { mon:'monday', tue:'tuesday', wed:'wednesday', thu:'thursday', fri:'friday', sat:'saturday', sun:'sunday' };
+  const active = new Set();
+  const ids = new Set([...gtfs.calendarByService.keys()]);
+  for (const k of gtfs.exceptions.keys()) ids.add(k.split(':')[1]);
+  for (const id of ids) {
+    const cal = gtfs.calendarByService.get(id);
+    let on = !!(cal && ymd >= cal.start_date && ymd <= cal.end_date && cal[weekdayMap[weekday]] === '1');
+    const ex = gtfs.exceptions.get(`${ymd}:${id}`);
+    if (ex === '1') on = true;
+    if (ex === '2') on = false;
+    if (on) active.add(id);
+  }
+  return active;
+}
+
+async function loadGenericGtfs(url, key) {
+  if (!url) throw new Error(`Source GTFS ${key} introuvable`);
+  const cached = genericGtfsCaches.get(key);
+  if (cached && cached.url === url && Date.now() - cached.loadedAt < EXTRA_STATIC_TTL) return cached.data;

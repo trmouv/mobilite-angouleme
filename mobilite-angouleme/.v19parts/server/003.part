@@ -1,0 +1,157 @@
+  const calendarByService = new Map(calendar.map(c => [c.service_id, c]));
+  const exceptions = new Map();
+  for (const x of calendarDates) exceptions.set(`${x.date}:${x.service_id}`, x.exception_type);
+
+  sncfCache = { stops, routeById, tripById, agencyById, stopNameById, stopById, stopTimesByTrip, stopTimesByStop, childrenByParent, calendarByService, exceptions };
+  sncfLoadedAt = Date.now();
+  return sncfCache;
+}
+
+function sncfActiveServices(gtfs, now = new Date()) {
+  const { ymd, weekday } = parisParts(now);
+  const weekdayMap = { mon: 'monday', tue: 'tuesday', wed: 'wednesday', thu: 'thursday', fri: 'friday', sat: 'saturday', sun: 'sunday' };
+  const active = new Set();
+  const serviceIds = new Set([...gtfs.calendarByService.keys()]);
+  for (const k of gtfs.exceptions.keys()) serviceIds.add(k.split(':')[1]);
+  for (const id of serviceIds) {
+    const cal = gtfs.calendarByService.get(id);
+    let on = !!(cal && ymd >= cal.start_date && ymd <= cal.end_date && cal[weekdayMap[weekday]] === '1');
+    const ex = gtfs.exceptions.get(`${ymd}:${id}`);
+    if (ex === '1') on = true;
+    if (ex === '2') on = false;
+    if (on) active.add(id);
+  }
+  return active;
+}
+
+function sncfTrainNumber(trip = {}) {
+  const raw = String(trip.trip_headsign || '').trim();
+  return /^\d{3,6}$/.test(raw) ? raw : '';
+}
+
+function sncfServiceType(gtfs, tripId) {
+  const trip = gtfs.tripById.get(tripId) || {};
+  const route = gtfs.routeById.get(trip.route_id) || {};
+  const agency = gtfs.agencyById.get(route.agency_id) || {};
+  const routeCode = String(route.route_short_name || '').trim().toUpperCase();
+  const trainNumber = sncfTrainNumber(trip);
+  const haystack = normalizeText([
+    route.route_short_name, route.route_long_name, route.route_desc,
+    route.route_id, agency.agency_name, agency.agency_url, trip.trip_headsign
+  ].filter(Boolean).join(' '));
+
+  if (/\bouigo\b/.test(haystack)) return 'OUIGO';
+  if (/\btgv\b|\binoui\b/.test(haystack)) return 'TGV INOUI';
+  if (/intercit/.test(haystack)) return 'INTERCITÉS';
+  if (/\bter\b/.test(haystack)) return 'TER';
+
+  // Les codes Lxx / Dxx correspondent aux lignes TER régionales dans le GTFS SNCF.
+  if (/^[LD]\d+[A-Z+]*$/.test(routeCode)) return 'TER';
+  // Les numéros 86xxxx/87xxxx sont très majoritairement des circulations TER.
+  if (/^(86|87)\d{4}$/.test(trainNumber)) return 'TER';
+  // À Angoulême les séries 433/533 sont utilisées par les circulations OUIGO.
+  if (/^(433|533)/.test(routeCode) || /^76\d{2}$/.test(trainNumber)) return 'OUIGO';
+  // Les Intercités nationaux utilisent fréquemment une numérotation 3xxx.
+  if (/^3\d{3}$/.test(trainNumber)) return 'INTERCITÉS';
+  // Les autres trains grandes lignes 4/5 chiffres vus sur les axes TGV sont classés INOUI.
+  if (/^\d{4,5}$/.test(trainNumber)) return 'TGV INOUI';
+  return 'Train';
+}
+
+function stationIdsForSncfRoot(gtfs, rootId) {
+  const ids = new Set([rootId]);
+  for (const id of gtfs.childrenByParent?.get(rootId) || []) ids.add(id);
+  return ids;
+}
+
+function findNearestSncfStation(gtfs, lat, lon) {
+  const candidates = gtfs.stops.filter(st => {
+    const slat=Number(st.stop_lat), slon=Number(st.stop_lon);
+    if (!Number.isFinite(slat)||!Number.isFinite(slon)) return false;
+    // Privilégie les zones de gare (location_type=1), sinon les arrêts sans parent.
+    return st.location_type === '1' || (!st.parent_station && (!st.location_type || st.location_type === '0'));
+  });
+  let best=null;
+  for (const st of candidates) {
+    const d=haversineMeters(lat,lon,Number(st.stop_lat),Number(st.stop_lon));
+    if (!best || d<best.distanceMeters) best={rootId:st.stop_id,name:st.stop_name||'Gare',lat:Number(st.stop_lat),lon:Number(st.stop_lon),distanceMeters:d};
+  }
+  if (!best) return null;
+  best.stationIds=stationIdsForSncfRoot(gtfs,best.rootId);
+  return best;
+}
+
+function sncfDestinationAfterStop(gtfs, tripId, currentStopId, currentStationIds = new Set()) {
+  const list = gtfs.stopTimesByTrip.get(tripId) || [];
+  const currentIndex = list.findIndex(st => st.stop_id === currentStopId);
+  if (currentIndex < 0 || currentIndex >= list.length - 1) return '';
+  for (let i = list.length - 1; i > currentIndex; i--) {
+    const name = gtfs.stopNameById.get(list[i].stop_id);
+    if (name && !currentStationIds.has(list[i].stop_id)) return name;
+  }
+  return '';
+}
+
+
+
+function decodeJsEscapes(value = '') {
+  return String(value)
+    .replace(/\\u([0-9a-f]{4})/gi, (_, h) => String.fromCharCode(parseInt(h, 16)))
+    .replace(/\\x([0-9a-f]{2})/gi, (_, h) => String.fromCharCode(parseInt(h, 16)))
+    .replace(/\\n/g, ' ')
+    .replace(/\\r/g, ' ')
+    .replace(/\\t/g, ' ')
+    .replace(/\\\"/g, '"')
+    .replace(/\\\'/g, "'")
+    .replace(/\\\//g, '/');
+}
+
+function normalizeStationDestination(value = '') {
+  return normalizeText(String(value)
+    .replace(/\b(?:gare de|gare d['’]|gare)\b/gi, ' ')
+    .replace(/\b(?:saint)\b/gi, 'st')
+    .replace(/\bpt dauphine\b/gi, 'pointe dauphine')
+    .replace(/[^a-zA-ZÀ-ÿ0-9]+/g, ' '));
+}
+
+function serviceFromGaresLabel(value = '') {
+  const s = normalizeText(value);
+  if (/ouigo/.test(s)) return 'OUIGO';
+  if (/tgv|inoui/.test(s)) return 'TGV INOUI';
+  if (/intercit/.test(s)) return 'INTERCITÉS';
+  if (/\bter\b|ter na|remi|zou/.test(s)) return 'TER';
+  return 'Train';
+}
+
+function parseGaresConnexionsDepartures(html = '') {
+  // Gares & Connexions rend parfois le tableau directement dans le HTML, parfois
+  // dans des données sérialisées. On analyse les deux représentations sans
+  // dépendre d'un numéro de voie codé en dur.
+  const variants = [];
+  const visible = htmlToText(html);
+  if (visible) variants.push(visible);
+  const raw = decodeHtmlEntities(decodeJsEscapes(html))
+    .replace(/<[^>]+>/g, ' ')
+    .replace(/&nbsp;/gi, ' ')
+    .replace(/\s+/g, ' ');
+  if (raw) variants.push(raw);
+
+  const out = [];
+  const seen = new Set();
+  // Exemple observé sur le site :
+  // "À l’heure 05:48 Nancy TGV INOUI | 2,501 Voie 3"
+  // "Retardé 17:33+5 min Orléans Rémi | 860,593 Voie"
+  const status = String.raw`(?:À l['’]heure|A l['’]heure|On time|Retardé|Retarde|Delayed|Supprimé|Supprime|Train deleted|Train supprimé|Train supprime|Train supplémentaire|Train supplementaire|Train additional)?`;
+  const service = String.raw`(TGV\s+INOUI|OUIGO|INTERCIT[ÉE]S?|Intercités|TER(?:\s+NA)?|Rémi|Remi|ZOU\s*!?)`;
+  const re = new RegExp(`${status}\\s*(\\d{1,2}:\\d{2})(?:\\s*\\+\\s*(\\d+)\\s*min)?\\s+(.{2,90}?)\\s+${service}\\s*\\|\\s*([A-Z0-9,+-]{1,16})\\s+Voie(?:\\s+([A-Z0-9]+))?`, 'gi');
+
+  for (const text of variants) {
+    let m;
+    while ((m = re.exec(text))) {
+      const destination = String(m[3] || '').trim().replace(/\s+/g, ' ');
+      const serviceName = serviceFromGaresLabel(m[4] || '');
+      const platform = String(m[6] || '').trim();
+      const trainRef = String(m[5] || '').replace(/,/g, '').trim();
+      const key = `${m[1]}|${normalizeStationDestination(destination)}|${serviceName}|${platform}|${trainRef}`;
+      if (seen.has(key)) continue;
+      seen.add(key);

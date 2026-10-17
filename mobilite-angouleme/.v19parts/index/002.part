@@ -1,0 +1,11 @@
+      <div class="field-group"><label for="interurbanRadius">Rayon cars interurbains <strong><span id="interurbanRadiusValue">10</span> min à pied</strong></label><input id="interurbanRadius" type="range" min="3" max="30" step="1" value="10" /><div class="range-hints"><span>3 min</span><span>30 min</span></div></div>
+      <div class="field-group"><label for="longDistanceRadius">Rayon cars longue distance <strong><span id="longDistanceRadiusValue">15</span> min à pied</strong></label><input id="longDistanceRadius" type="range" min="3" max="40" step="1" value="15" /><div class="range-hints"><span>3 min</span><span>40 min</span></div></div>
+      <div class="field-group"><label for="carpoolRadius">Rayon covoiturage <strong><span id="carpoolRadiusValue">15</span> min à pied</strong></label><input id="carpoolRadius" type="range" min="3" max="40" step="1" value="15" /><div class="range-hints"><span>3 min</span><span>40 min</span></div></div>
+      <div class="field-group"><label for="parkingRadius">Rayon parkings / P+R <strong><span id="parkingRadiusValue">15</span> min à pied</strong></label><input id="parkingRadius" type="range" min="3" max="40" step="1" value="15" /><div class="range-hints"><span>3 min</span><span>40 min</span></div></div>
+      <div class="field-group"><label for="chargingRadius">Rayon bornes de recharge <strong><span id="chargingRadiusValue">15</span> min à pied</strong></label><input id="chargingRadius" type="range" min="3" max="40" step="1" value="15" /><div class="range-hints"><span>3 min</span><span>40 min</span></div></div>
+    </div>
+  </aside>
+
+  <script src="/app.js" defer></script>
+</body>
+</html>

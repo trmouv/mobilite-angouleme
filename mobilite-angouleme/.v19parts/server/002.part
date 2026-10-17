@@ -1,0 +1,155 @@
+  if (gtfsCache && Date.now() - gtfsLoadedAt < STATIC_TTL) return gtfsCache;
+  const r = await fetchOk(GTFS_STATIC_URL, { redirect: 'follow' });
+  const zip = new AdmZip(Buffer.from(await r.arrayBuffer()));
+  const stops = zipCsv(zip, 'stops.txt');
+  const routes = zipCsv(zip, 'routes.txt');
+  const trips = zipCsv(zip, 'trips.txt');
+  const stopTimes = zipCsv(zip, 'stop_times.txt');
+  const calendar = zipCsv(zip, 'calendar.txt');
+  const calendarDates = zipCsv(zip, 'calendar_dates.txt');
+
+  const routeById = new Map(routes.map(r => [r.route_id, r]));
+  const tripById = new Map(trips.map(t => [t.trip_id, t]));
+  const stopTimesByStop = new Map();
+  for (const st of stopTimes) {
+    if (!stopTimesByStop.has(st.stop_id)) stopTimesByStop.set(st.stop_id, []);
+    stopTimesByStop.get(st.stop_id).push(st);
+  }
+  for (const arr of stopTimesByStop.values()) arr.sort((a, b) => gtfsTimeToSeconds(a.departure_time) - gtfsTimeToSeconds(b.departure_time));
+
+  const calendarByService = new Map(calendar.map(c => [c.service_id, c]));
+  const exceptions = new Map();
+  for (const x of calendarDates) exceptions.set(`${x.date}:${x.service_id}`, x.exception_type);
+
+  gtfsCache = { stops, routeById, tripById, stopTimesByStop, calendarByService, exceptions };
+  gtfsLoadedAt = Date.now();
+  return gtfsCache;
+}
+
+function activeServices(gtfs, now = new Date()) {
+  const { ymd, weekday } = parisParts(now);
+  const weekdayMap = { mon: 'monday', tue: 'tuesday', wed: 'wednesday', thu: 'thursday', fri: 'friday', sat: 'saturday', sun: 'sunday' };
+  const active = new Set();
+  const serviceIds = new Set([...gtfs.calendarByService.keys()]);
+  for (const k of gtfs.exceptions.keys()) serviceIds.add(k.split(':')[1]);
+
+  for (const id of serviceIds) {
+    const cal = gtfs.calendarByService.get(id);
+    let on = !!(cal && ymd >= cal.start_date && ymd <= cal.end_date && cal[weekdayMap[weekday]] === '1');
+    const ex = gtfs.exceptions.get(`${ymd}:${id}`);
+    if (ex === '1') on = true;
+    if (ex === '2') on = false;
+    if (on) active.add(id);
+  }
+  return active;
+}
+
+function routeMeta(gtfs, tripId) {
+  const t = gtfs.tripById.get(tripId);
+  if (!t) return { route: '?', routeId: '', headsign: '', color: '' };
+  const r = gtfs.routeById.get(t.route_id) || {};
+  return {
+    route: r.route_short_name || r.route_long_name || t.route_id,
+    routeId: t.route_id,
+    headsign: t.trip_headsign || '',
+    color: r.route_color || ''
+  };
+}
+
+async function realtimeByStop(gtfs, wantedStops) {
+  const out = new Map([...wantedStops].map(id => [id, []]));
+  try {
+    const r = await fetchOk(GTFS_RT_URL);
+    const feed = GtfsRealtimeBindings.transit_realtime.FeedMessage.decode(new Uint8Array(await r.arrayBuffer()));
+    const now = Math.floor(Date.now() / 1000);
+    for (const entity of feed.entity || []) {
+      const tu = entity.tripUpdate;
+      if (!tu?.trip) continue;
+      const meta = routeMeta(gtfs, tu.trip.tripId);
+      for (const stu of tu.stopTimeUpdate || []) {
+        if (!wantedStops.has(stu.stopId)) continue;
+        const epoch = Number(stu.departure?.time || stu.arrival?.time || 0);
+        if (!epoch || epoch < now - 90 || epoch > now + 3 * 3600) continue;
+        out.get(stu.stopId).push({
+          ...meta,
+          tripId: tu.trip.tripId,
+          epoch,
+          time: new Intl.DateTimeFormat('fr-FR', { timeZone: 'Europe/Paris', hour: '2-digit', minute: '2-digit' }).format(new Date(epoch * 1000)),
+          minutes: Math.max(0, Math.round((epoch - now) / 60)),
+          realtime: true
+        });
+      }
+    }
+    for (const v of out.values()) v.sort((a, b) => a.epoch - b.epoch);
+  } catch (e) {
+    console.warn('GTFS-RT indisponible:', e.message);
+  }
+  return out;
+}
+
+function scheduledForStopWindow(gtfs, stopId, fromOffsetSeconds = -60, toOffsetSeconds = 3 * 3600, max = 5) {
+  const { seconds } = parisParts();
+  const active = activeServices(gtfs);
+  const list = [];
+  for (const st of gtfs.stopTimesByStop.get(stopId) || []) {
+    const depSec = gtfsTimeToSeconds(st.departure_time || st.arrival_time);
+    if (depSec == null || depSec < seconds + fromOffsetSeconds || depSec > seconds + toOffsetSeconds) continue;
+    const trip = gtfs.tripById.get(st.trip_id);
+    if (!trip || !active.has(trip.service_id)) continue;
+    const meta = routeMeta(gtfs, st.trip_id);
+    list.push({ ...meta, tripId: st.trip_id, time: formatGtfsClock(st.departure_time || st.arrival_time), minutes: Math.max(0, Math.round((depSec - seconds) / 60)), realtime: false });
+  }
+  list.sort((a, b) => a.minutes - b.minutes);
+  return list.slice(0, max);
+}
+
+function scheduledForStop(gtfs, stopId, max = 5) {
+  return scheduledForStopWindow(gtfs, stopId, -60, 3 * 3600, max);
+}
+
+function scheduledForNextPeriod(gtfs, stopId, max = 18) {
+  // Fenêtre de secours : tranche horaire suivant les 3 prochaines heures (+3 h à +6 h).
+  return scheduledForStopWindow(gtfs, stopId, 3 * 3600, 6 * 3600, max);
+}
+
+
+function normalizeText(value = '') {
+  return String(value).normalize('NFD').replace(/[\u0300-\u036f]/g, '').toLowerCase().replace(/[^a-z0-9]+/g, ' ').trim();
+}
+
+async function loadSncfGtfs() {
+  if (sncfCache && Date.now() - sncfLoadedAt < SNCF_STATIC_TTL) return sncfCache;
+  const r = await fetchOk(SNCF_GTFS_STATIC_URL, { redirect: 'follow' });
+  const zip = new AdmZip(Buffer.from(await r.arrayBuffer()));
+  const stops = zipCsv(zip, 'stops.txt');
+  const routes = zipCsv(zip, 'routes.txt');
+  const trips = zipCsv(zip, 'trips.txt');
+  const stopTimes = zipCsv(zip, 'stop_times.txt');
+  const calendar = zipCsv(zip, 'calendar.txt');
+  const calendarDates = zipCsv(zip, 'calendar_dates.txt');
+  const agencies = zipCsv(zip, 'agency.txt');
+
+  const routeById = new Map(routes.map(r => [r.route_id, r]));
+  const tripById = new Map(trips.map(t => [t.trip_id, t]));
+  const agencyById = new Map(agencies.map(a => [a.agency_id, a]));
+  const stopNameById = new Map(stops.map(st => [st.stop_id, st.stop_name || '']));
+  const stopById = new Map(stops.map(st => [st.stop_id, st]));
+  const stopTimesByTrip = new Map();
+  for (const st of stopTimes) {
+    if (!stopTimesByTrip.has(st.trip_id)) stopTimesByTrip.set(st.trip_id, []);
+    stopTimesByTrip.get(st.trip_id).push(st);
+  }
+  for (const list of stopTimesByTrip.values()) {
+    list.sort((a,b) => Number(a.stop_sequence || 0) - Number(b.stop_sequence || 0));
+  }
+  const stopTimesByStop = new Map();
+  for (const st of stopTimes) {
+    if (!stopTimesByStop.has(st.stop_id)) stopTimesByStop.set(st.stop_id, []);
+    stopTimesByStop.get(st.stop_id).push(st);
+  }
+  for (const list of stopTimesByStop.values()) list.sort((a,b)=>gtfsTimeToSeconds(a.departure_time||a.arrival_time)-gtfsTimeToSeconds(b.departure_time||b.arrival_time));
+  const childrenByParent = new Map();
+  for (const st of stops) if (st.parent_station) {
+    if (!childrenByParent.has(st.parent_station)) childrenByParent.set(st.parent_station, []);
+    childrenByParent.get(st.parent_station).push(st.stop_id);
+  }

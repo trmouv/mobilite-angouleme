@@ -1,0 +1,120 @@
+  const r = await fetchOk(url, { redirect:'follow' });
+  const zip = new AdmZip(Buffer.from(await r.arrayBuffer()));
+  const stops = zipCsv(zip,'stops.txt');
+  const routes = zipCsv(zip,'routes.txt');
+  const trips = zipCsv(zip,'trips.txt');
+  const stopTimes = zipCsv(zip,'stop_times.txt');
+  const calendar = zipCsv(zip,'calendar.txt');
+  const calendarDates = zipCsv(zip,'calendar_dates.txt');
+  const agency = zipCsv(zip,'agency.txt');
+  const stopById = new Map(stops.map(x=>[x.stop_id,x]));
+  const routeById = new Map(routes.map(x=>[x.route_id,x]));
+  const tripById = new Map(trips.map(x=>[x.trip_id,x]));
+  const agencyById = new Map(agency.map(x=>[x.agency_id,x]));
+  const stopTimesByStop = new Map();
+  const stopTimesByTrip = new Map();
+  for (const st of stopTimes) {
+    if (!stopTimesByStop.has(st.stop_id)) stopTimesByStop.set(st.stop_id,[]);
+    stopTimesByStop.get(st.stop_id).push(st);
+    if (!stopTimesByTrip.has(st.trip_id)) stopTimesByTrip.set(st.trip_id,[]);
+    stopTimesByTrip.get(st.trip_id).push(st);
+  }
+  for (const arr of stopTimesByStop.values()) arr.sort((a,b)=>gtfsTimeToSeconds(a.departure_time||a.arrival_time)-gtfsTimeToSeconds(b.departure_time||b.arrival_time));
+  for (const arr of stopTimesByTrip.values()) arr.sort((a,b)=>Number(a.stop_sequence||0)-Number(b.stop_sequence||0));
+  const calendarByService = new Map(calendar.map(c=>[c.service_id,c]));
+  const exceptions = new Map(calendarDates.map(x=>[`${x.date}:${x.service_id}`,x.exception_type]));
+  const data = { stops, stopById, routeById, tripById, agencyById, stopTimesByStop, stopTimesByTrip, calendarByService, exceptions };
+  genericGtfsCaches.set(key,{ url, loadedAt:Date.now(), data });
+  return data;
+}
+
+function cleanCoachCity(name='') {
+  let s=String(name||'').trim();
+  if(!s) return 'Destination non indiquée';
+  s=s.replace(/\s*\([^)]*\)\s*$/,'').trim();
+  if(/\s+-\s+/.test(s)) s=s.split(/\s+-\s+/)[0].trim();
+  else if(s.includes(',')) s=s.split(',')[0].trim();
+  return s || String(name||'').trim();
+}
+function genericDestination(gtfs, tripId, stopId, preferFinalStop=false) {
+  const trip = gtfs.tripById.get(tripId) || {};
+  const list = gtfs.stopTimesByTrip.get(tripId) || [];
+  const idx = list.findIndex(x=>x.stop_id===stopId);
+  const finalStop=()=>{ for(let i=list.length-1;i>idx;i--){const st=gtfs.stopById.get(list[i].stop_id);if(st?.stop_name)return st.stop_name;} return ''; };
+  if(preferFinalStop){ const f=finalStop(); if(f)return cleanCoachCity(f); }
+  const headsign = String(trip.trip_headsign || '').trim();
+  if (headsign && !/^\d+$/.test(headsign) && !/^[A-Z0-9_-]{3,10}$/i.test(headsign)) return headsign;
+  const f=finalStop(); return f || headsign || 'Destination non indiquée';
+}
+
+function nearbyGtfsDepartures(gtfs, {lat,lon,speedKmh,maxWalkMin,limitStops=8,operator='',agencyPattern=null,routeTypes=null,preferFinalStop=false,hideLine=false}) {
+  const active = genericActiveServices(gtfs);
+  const { seconds } = parisParts();
+  const nearby = gtfs.stops
+    .filter(s => !s.location_type || s.location_type === '0')
+    .map(s => {
+      const slat=Number(s.stop_lat), slon=Number(s.stop_lon);
+      const distance = haversineMeters(lat,lon,slat,slon);
+      return { id:s.stop_id, name:s.stop_name, lat:slat, lon:slon, distanceMeters:Math.round(distance), walkMinutes:Math.ceil(walkMinutes(distance,speedKmh)) };
+    })
+    .filter(s=>Number.isFinite(s.lat)&&Number.isFinite(s.lon)&&s.walkMinutes<=maxWalkMin)
+    .sort((a,b)=>a.distanceMeters-b.distanceMeters)
+    .slice(0,Math.max(limitStops*3,limitStops));
+
+  const stopGroups = new Map();
+  for (const stop of nearby) {
+    const key = normalizeText(stop.name);
+    if (!stopGroups.has(key)) stopGroups.set(key,{...stop,stopIds:[]});
+    const g=stopGroups.get(key); g.stopIds.push(stop.id);
+    if (stop.distanceMeters<g.distanceMeters) Object.assign(g,{...stop,stopIds:g.stopIds});
+  }
+  const result=[];
+  for (const stop of [...stopGroups.values()].sort((a,b)=>a.distanceMeters-b.distanceMeters).slice(0,limitStops)) {
+    const groups=new Map();
+    for (const stopId of stop.stopIds) {
+      for (const st of gtfs.stopTimesByStop.get(stopId)||[]) {
+        const depSec=gtfsTimeToSeconds(st.departure_time||st.arrival_time);
+        if (depSec==null || depSec < seconds-60 || depSec > seconds+12*3600) continue;
+        const trip=gtfs.tripById.get(st.trip_id); if(!trip||!active.has(trip.service_id)) continue;
+        const route=gtfs.routeById.get(trip.route_id)||{};
+        const agency=gtfs.agencyById.get(route.agency_id)||{};
+        if (agencyPattern && !agencyPattern.test(String(agency.agency_name||''))) continue;
+        if (routeTypes && !routeTypes.has(String(route.route_type ?? ''))) continue;
+        const destination=genericDestination(gtfs,st.trip_id,stopId,preferFinalStop);
+        const line=hideLine?'':(route.route_short_name||route.route_long_name||trip.route_id||'');
+        const op=operator||agency.agency_name||'';
+        const k=`${line}||${destination}||${op}`;
+        if(!groups.has(k)) groups.set(k,{line,destination,operator:op,passages:[]});
+        groups.get(k).passages.push({
+          time:formatGtfsClock(st.departure_time||st.arrival_time),
+          minutes:Math.max(0,Math.round((depSec-seconds)/60)), realtime:false, tripId:st.trip_id
+        });
+      }
+    }
+    const services=[...groups.values()].map(g=>({...g,passages:g.passages.sort((a,b)=>a.minutes-b.minutes).slice(0,4)})).filter(g=>g.passages.length).sort((a,b)=>a.passages[0].minutes-b.passages[0].minutes);
+    if(services.length) result.push({...stop,services});
+  }
+  return result;
+}
+
+async function getInterurban(lat,lon,speedKmh,maxWalkMin) {
+  const url=await discoverPanResource({datasetIncludes:['agrégat','réseaux','nouvelle aquitaine'],resourceIncludes:['gtfs'],formats:['gtfs'],envUrl:'NAQ_AGGREGATE_GTFS_URL'});
+  const gtfs=await loadGenericGtfs(url,'naq-aggregate');
+  return { source:url, stops:nearbyGtfsDepartures(gtfs,{lat,lon,speedKmh,maxWalkMin,limitStops:10,agencyPattern:/cars? régionaux/i}) };
+}
+
+async function getLongDistance(lat,lon,speedKmh,maxWalkMin) {
+  const configs=[
+    {key:'flixbus',operator:'FlixBus', datasetIncludes:['flixbus'], formats:['gtfs'], envUrl:'FLIXBUS_GTFS_URL'},
+    {key:'blablacar',operator:'BlaBlaCar Bus', datasetIncludes:['blablacar','bus'], formats:['gtfs'], envUrl:'BLABLACAR_GTFS_URL'}
+  ];
+  const all=[]; const sources=[];
+  for (const cfg of configs) {
+    try {
+      const url=await discoverPanResource(cfg); sources.push(url);
+      const gtfs=await loadGenericGtfs(url,cfg.key);
+      const stops=nearbyGtfsDepartures(gtfs,{lat,lon,speedKmh,maxWalkMin,limitStops:8,operator:cfg.operator,preferFinalStop:true,hideLine:true});
+      for(const s of stops) all.push({...s,services:s.services.map(x=>({...x,operator:cfg.operator}))});
+    } catch(e) { console.warn(`${cfg.operator} indisponible:`,e.message); }
+  }
+  const merged=new Map();

@@ -1,0 +1,50 @@
+            const row = groups.get(key);
+            if (row.passages.length < 3) {
+              row.passages.push({ time: a.time, minutes: a.minutes, epoch: a.epoch, realtime: a.realtime });
+              row.realtime = row.realtime || a.realtime;
+            }
+          }
+          return [...groups.values()]
+            .filter(r => r.passages.length)
+            .sort((a, b) => a.passages[0].minutes - b.passages[0].minutes);
+        };
+
+        const routeDirections = makeGroups(platformArrivals);
+        const futureRouteDirections = makeGroups(platformNextPeriod);
+        const labels = [...new Set([...routeDirections, ...futureRouteDirections].map(r => r.headsign).filter(Boolean))];
+        return {
+          id: platform.id,
+          label: labels.length ? labels.slice(0, 2).join(' / ') : `Direction ${index + 1}`,
+          routeDirections,
+          futureRouteDirections
+        };
+      }).filter(d => d.routeDirections.length || d.futureRouteDirections.length);
+
+      // Certains réseaux peuvent exposer plusieurs stop_id pour le même sens.
+      // Si aucune direction exploitable n'est trouvée, on garde le format historique.
+      if (!stop.directions.length && stop.routeDirections.length) {
+        stop.directions = [{ id: `${stop.id}:default`, label: 'Direction', routeDirections: stop.routeDirections }];
+      }
+      stop.served = stop.directions.some(d => (d.routeDirections?.length || d.futureRouteDirections?.length));
+      delete stop.stopIds;
+      delete stop.platforms;
+    }
+
+    let bikes = [];
+    const [modalisBikes,tbmBikes]=await Promise.all([
+      getBikes(lat,lon,speedKmh,maxBikeWalkMin,bikeLimit).catch(e=>{console.warn('Vélo Modalis indisponible:',e.message);return[];}),
+      getTbmBikes(lat,lon,speedKmh,maxBikeWalkMin,bikeLimit).catch(e=>{console.warn('Le Vélo TBM indisponible:',e.message);return[];})
+    ]);
+    bikes=[...modalisBikes,...tbmBikes].sort((a,b)=>a.distanceMeters-b.distanceMeters).slice(0,bikeLimit);
+
+    res.json({
+      generatedAt: new Date().toISOString(), speedKmh, maxBusWalkMin, maxBikeWalkMin,
+      busRealtimeSource: GTFS_RT_URL, trafficSource: STGA_TRAFFIC_URL, bikes, busStops
+    });
+  } catch (e) {
+    console.error(e);
+    res.status(502).json({ error: `Données mobilité indisponibles : ${e.message}` });
+  }
+});
+
+app.listen(PORT, () => console.log(`Mobilité Angoulême : http://localhost:${PORT}`));

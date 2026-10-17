@@ -1,0 +1,152 @@
+<!doctype html>
+<html lang="fr" data-theme="light">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <meta name="theme-color" content="#f4f6f8" />
+  <meta name="apple-mobile-web-app-capable" content="yes" />
+  <meta name="apple-mobile-web-app-status-bar-style" content="default" />
+  <meta name="apple-mobile-web-app-title" content="Mobilité" />
+  <link rel="manifest" href="/manifest.webmanifest" />
+  <title>Mobilité autour de moi</title>
+  <link rel="stylesheet" href="/styles.css" />
+</head>
+<body>
+  <main class="shell">
+    <header class="topbar">
+      <div class="brand-block">
+        <p class="eyebrow">MOBILITÉ MULTIRÉSEAUX · TEMPS RÉEL</p>
+        <h1>Mes départs à proximité</h1>
+        <p class="lede">Tous tes départs et services de mobilité autour de chez toi, réunis dans une seule interface.</p>
+      </div>
+      <div class="header-actions" aria-label="Actions">
+        <button id="themeToggle" class="icon-btn" type="button" aria-label="Activer le mode nuit" title="Mode jour / nuit">☀️</button>
+        <button id="refresh" class="icon-btn" type="button" aria-label="Actualiser" title="Actualiser">↻</button>
+        <button id="openSettings" class="icon-btn" type="button" aria-label="Ouvrir les réglages" title="Réglages">⚙️</button>
+        <button id="installApp" class="icon-btn install-hidden" type="button" aria-label="Installer l'application" title="Installer">⇩</button>
+      </div>
+    </header>
+
+    <div id="status" class="status">Localisation de ton domicile…</div>
+
+
+    <section class="hero-section">
+      <div class="section-title">
+        <div><span class="icon">⚡</span><h2>Meilleure option maintenant</h2></div>
+        <span class="pill">comparaison immédiate</span>
+      </div>
+      <div id="bestOption" class="best-option"></div>
+    </section>
+
+    <section>
+      <div class="section-title">
+        <div><span class="icon">🚲</span><h2>Vélos à proximité</h2></div>
+        <span id="bikeRadiusLabel" class="pill">4 stations max · ≤ 10 min</span>
+      </div>
+      <div id="bikes" class="grid"></div>
+    </section>
+
+    <section>
+      <div class="section-title">
+        <div><span class="icon">🚏</span><h2>Arrêts de transports urbains à proximité</h2></div>
+        <span id="busCount" class="pill">≤ 10 min à pied</span>
+      </div>
+      <div id="buses" class="stack"></div>
+    </section>
+
+    <section>
+      <div class="section-title">
+        <div><span class="icon">📞</span><h2 id="tadTitle">Transport à la demande</h2></div>
+        <span id="tadLabel" class="pill">sur réservation</span>
+      </div>
+      <div id="tad" class="stack"></div>
+    </section>
+
+    <section>
+      <div class="section-title">
+        <div><span class="icon">🚆</span><h2 id="trainTitle">Prochains trains au départ de la gare la plus proche</h2></div>
+        <span id="trainCount" class="pill">SNCF · prochains départs</span>
+      </div>
+      <div id="trains" class="train-card"></div>
+    </section>
+
+    <section>
+      <div class="section-title"><div><span class="icon">🚌</span><h2>Cars interurbains à proximité</h2></div><span id="interurbanCount" class="pill">à proximité</span></div>
+      <div id="interurban" class="stack"></div>
+    </section>
+
+    <section>
+      <div class="section-title"><div><span class="icon">🧳</span><h2>Cars longue distance</h2></div><span id="longDistanceCount" class="pill">FlixBus, BlaBlaCar Bus…</span></div>
+      <div id="longDistance" class="stack"></div>
+    </section>
+
+    <section>
+      <div class="section-title"><div><span class="icon">🚗</span><h2>Covoiturage à proximité</h2></div><span id="carpoolCount" class="pill">aires publiques</span></div>
+      <div id="carpool" class="grid"></div>
+    </section>
+
+    <section>
+      <div class="section-title"><div><span class="icon">🅿️</span><h2>Parkings et P+R à proximité</h2></div><span id="parkingCount" class="pill">données publiques</span></div>
+      <div id="parking" class="grid"></div>
+    </section>
+
+    <section>
+      <div class="section-title"><div><span class="icon">🔌</span><h2>Bornes de recharge électrique</h2></div><span id="chargingCount" class="pill">IRVE</span></div>
+      <div id="charging" class="grid"></div>
+    </section>
+
+    <footer>Les temps de marche sont estimés selon ta vitesse de marche. Prévois davantage de marge si le trajet réel comporte détours, feux ou dénivelé.</footer>
+  </main>
+
+  <div id="settingsBackdrop" class="settings-backdrop" hidden></div>
+  <aside id="settingsPanel" class="settings-drawer" aria-hidden="true" aria-labelledby="settingsTitle">
+    <div class="drawer-head">
+      <div>
+        <p class="eyebrow">PRÉFÉRENCES</p>
+        <h2 id="settingsTitle">Réglages</h2>
+      </div>
+      <button id="closeSettings" class="icon-btn" type="button" aria-label="Fermer les réglages">✕</button>
+    </div>
+
+    <div class="settings-content">
+      <div class="field-group">
+        <label for="address">Adresse du domicile</label>
+        <textarea id="address" rows="2" autocomplete="street-address">165 avenue Gambetta 16000 Angoulême</textarea>
+        <div class="settings-actions">
+          <button id="saveAddress" class="primary-btn" type="button">Utiliser cette adresse</button>
+          <button id="useLocation" class="secondary-btn" type="button">⌖ Utiliser ma position</button>
+        </div>
+        <p id="geocodeState" class="muted">L’adresse est enregistrée uniquement dans ce navigateur.</p>
+      </div>
+
+      <div class="field-group">
+        <label for="speed">Vitesse de marche</label>
+        <select id="speed">
+          <option value="4">Tranquille · 4 km/h</option>
+          <option value="4.8" selected>Normale · 4,8 km/h</option>
+          <option value="5.5">Rapide · 5,5 km/h</option>
+        </select>
+      </div>
+
+      <div class="field-group">
+        <label for="buffer">Marge avant le bus</label>
+        <select id="buffer">
+          <option value="1">1 min</option>
+          <option value="2" selected>2 min</option>
+          <option value="3">3 min</option>
+          <option value="5">5 min</option>
+        </select>
+      </div>
+
+      <div class="field-group">
+        <label for="busRadius">Rayon de recherche transports urbains <strong><span id="busRadiusValue">10</span> min à pied</strong></label>
+        <input id="busRadius" type="range" min="3" max="20" step="1" value="10" />
+        <div class="range-hints"><span>3 min</span><span>20 min</span></div>
+      </div>
+
+      <div class="field-group">
+        <label for="bikeRadius">Rayon de recherche vélos <strong><span id="bikeRadiusValue">10</span> min à pied</strong></label>
+        <input id="bikeRadius" type="range" min="3" max="20" step="1" value="10" />
+        <div class="range-hints"><span>3 min</span><span>20 min</span></div>
+      </div>
+

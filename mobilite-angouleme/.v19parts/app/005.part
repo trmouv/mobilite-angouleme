@@ -1,0 +1,112 @@
+  target.innerHTML=`<article class="best-card"><div class="best-kicker">OPTION RECOMMANDÉE</div><div class="best-main"><div class="best-icon">${best.icon}</div><div><div class="best-kind">${esc(best.kind)}</div><h3>${esc(best.title)}</h3><p>${esc(best.subtitle)}</p></div><div class="best-when">${esc(best.when)}</div></div>${Number.isFinite(best.leave)?`<div class="best-leave">Tu peux partir dans environ <strong>${Math.max(0,Math.round(best.leave))} min</strong></div>`:''}${alt.length?`<div class="alternatives"><span>Alternatives</span>${alt.map(o=>`<div><b>${o.icon} ${esc(o.kind)}</b><small>${esc(o.title)} · ${esc(o.when)}</small></div>`).join('')}</div>`:''}</article>`;
+}
+
+function trainLogoForService(service=''){
+  const s = String(service).normalize('NFD').replace(/[\u0300-\u036f]/g,'').toUpperCase();
+  if (s.includes('OUIGO')) return { src:'/train-logos/ouigo.svg', alt:'OUIGO' };
+  if (s.includes('TGV') || s.includes('INOUI')) return { src:'/train-logos/tgv-inoui.svg', alt:'TGV INOUI' };
+  if (s.includes('INTERCIT')) return { src:'/train-logos/intercites.svg', alt:'INTERCITÉS' };
+  if (/\bTER\b/.test(s)) return { src:'/train-logos/ter.svg', alt:'TER' };
+  return null;
+}
+
+function formatTrainClock(value=''){
+  const m = String(value).match(/^(\d{1,2}):(\d{2})/);
+  return m ? `${String(Number(m[1])%24).padStart(2,'0')}h${m[2]}` : String(value);
+}
+function trainClockFromDeparture(t){
+  if (t?.realtime && t.epoch) {
+    return new Intl.DateTimeFormat('fr-FR', { timeZone:'Europe/Paris', hour:'2-digit', minute:'2-digit', hour12:false }).format(new Date(Number(t.epoch)*1000)).replace(':','h');
+  }
+  return formatTrainClock(t?.scheduledTime || '');
+}
+
+function esc(v=''){ return String(v).replace(/[&<>"']/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#039;'}[c])); }
+function escAttr(v=''){ return esc(v).replace(/`/g,'&#096;'); }
+function safeColor(v=''){ return /^[0-9A-Fa-f]{6}$/.test(v) ? v : '111827'; }
+
+async function useAddress(){
+  try{
+    const address = $('#address').value.trim();
+    if(!address) return;
+    $('#saveAddress').disabled = true;
+    $('#geocodeState').textContent = 'Recherche de l’adresse…';
+    const result = await geocode(address);
+    state.home = result;
+    localStorage.setItem('homeAddress', address);
+    localStorage.setItem('homePoint', JSON.stringify(result));
+    $('#geocodeState').textContent = `Adresse reconnue : ${result.label}`;
+    await loadMobility();
+    closeSettings();
+  }catch(e){ setStatus(e.message,true); $('#geocodeState').textContent=e.message; }
+  finally{ $('#saveAddress').disabled=false; }
+}
+
+async function useCurrentLocation(){
+  if(!navigator.geolocation){ $('#geocodeState').textContent='La géolocalisation n’est pas disponible dans ce navigateur.'; return; }
+  const btn = $('#useLocation');
+  btn.disabled = true;
+  $('#geocodeState').textContent = 'Recherche de ta position…';
+  navigator.geolocation.getCurrentPosition(async pos => {
+    try{
+      const { latitude:lat, longitude:lon } = pos.coords;
+      const result = await reverseGeocode(lat, lon);
+      state.home = result;
+      $('#address').value = result.label;
+      localStorage.setItem('homeAddress', result.label);
+      localStorage.setItem('homePoint', JSON.stringify(result));
+      $('#geocodeState').textContent = `Position reconnue : ${result.label}`;
+      await loadMobility();
+    }catch(e){ $('#geocodeState').textContent = e.message; }
+    finally{ btn.disabled=false; }
+  }, err => {
+    const messages = {1:'Autorisation de localisation refusée.',2:'Position indisponible.',3:'La localisation a pris trop de temps.'};
+    $('#geocodeState').textContent = messages[err.code] || 'Impossible de récupérer ta position.';
+    btn.disabled=false;
+  }, { enableHighAccuracy:true, timeout:10000, maximumAge:60000 });
+}
+
+$('#saveAddress').addEventListener('click',useAddress);
+$('#useLocation').addEventListener('click',useCurrentLocation);
+$('#address').addEventListener('keydown',e=>{ if(e.key==='Enter' && !e.shiftKey){ e.preventDefault(); useAddress(); } });
+$('#refresh').addEventListener('click',()=>loadMobility().catch(e=>setStatus(e.message,true)));
+$('#openSettings').addEventListener('click',openSettings);
+$('#closeSettings').addEventListener('click',closeSettings);
+$('#settingsBackdrop').addEventListener('click',closeSettings);
+document.addEventListener('keydown',e=>{ if(e.key==='Escape') closeSettings(); });
+$('#themeToggle').addEventListener('click',()=>applyTheme(document.documentElement.dataset.theme === 'dark' ? 'light' : 'dark'));
+$('#speed').addEventListener('change',()=>{ localStorage.setItem('walkSpeed',$('#speed').value); loadMobility().catch(e=>setStatus(e.message,true)); });
+$('#buffer').addEventListener('change',()=>{ localStorage.setItem('busBuffer',$('#buffer').value); render(); });
+$('#busRadius').addEventListener('input',()=>{ $('#busRadiusValue').textContent=$('#busRadius').value; });
+$('#busRadius').addEventListener('change',()=>{ localStorage.setItem('busWalkRadius',$('#busRadius').value); loadMobility().catch(e=>setStatus(e.message,true)); });
+$('#bikeRadius').addEventListener('input',()=>{ $('#bikeRadiusValue').textContent=$('#bikeRadius').value; });
+$('#bikeRadius').addEventListener('change',()=>{ localStorage.setItem('bikeWalkRadius',$('#bikeRadius').value); loadMobility().catch(e=>setStatus(e.message,true)); });
+
+const radiusSettings=[
+  ['#interurbanRadius','#interurbanRadiusValue','interurbanWalkRadius','10'],
+  ['#longDistanceRadius','#longDistanceRadiusValue','longDistanceWalkRadius','15'],
+  ['#carpoolRadius','#carpoolRadiusValue','carpoolWalkRadius','15'],
+  ['#parkingRadius','#parkingRadiusValue','parkingWalkRadius','15'],
+  ['#chargingRadius','#chargingRadiusValue','chargingWalkRadius','15']
+];
+for(const [sel,label,key] of radiusSettings){
+  $(sel)?.addEventListener('input',()=>{$(label).textContent=$(sel).value;});
+  $(sel)?.addEventListener('change',()=>{localStorage.setItem(key,$(sel).value); state.extras=null; loadExtras().catch(()=>{});});
+}
+
+$('#buses').addEventListener('click', async e => {
+  const disruptionBtn = e.target.closest('.disruption-toggle');
+  if (disruptionBtn) {
+    const details = disruptionBtn.nextElementSibling;
+    const isOpen = disruptionBtn.getAttribute('aria-expanded') === 'true';
+    disruptionBtn.setAttribute('aria-expanded', String(!isOpen));
+    details.hidden = isOpen;
+    if (!isOpen && !details.dataset.loaded) {
+      details.innerHTML = '<div class="disruption-loading">Chargement des informations…</div>';
+      try {
+        const alerts = JSON.parse(disruptionBtn.dataset.alerts || '[]');
+        const blocks = await Promise.all(alerts.map(async alert => {
+          try {
+            const r = await fetch(`/api/traffic-detail?url=${encodeURIComponent(alert.url)}`);
+            const j = await r.json();
+            if (!r.ok) throw new Error(j.error || 'Détail indisponible');

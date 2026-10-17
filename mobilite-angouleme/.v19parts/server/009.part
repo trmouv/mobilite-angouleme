@@ -1,0 +1,142 @@
+    if (value.fr) return localizedText(value.fr, fallback);
+    if (Array.isArray(value.translations)) return localizedText(value.translations, fallback);
+    for (const v of Object.values(value)) {
+      const text = localizedText(v, '');
+      if (text) return text;
+    }
+  }
+  return fallback;
+}
+
+function gbfsFeeds(root){
+  const direct=root?.data?.feeds;
+  if(Array.isArray(direct)) return direct;
+  const data=root?.data||{};
+  for(const value of Object.values(data)) if(value && Array.isArray(value.feeds)) return value.feeds;
+  return [];
+}
+
+async function getTbmBikes(lat,lon,speedKmh,maxWalkMin,limit=4){
+  if(!isNearBordeaux(lat,lon)) return [];
+  try{
+    const root=await (await fetchOk(TBM_GBFS_URL)).json();
+    const feeds=gbfsFeeds(root);
+    const infoUrl=feeds.find(x=>x.name==='station_information')?.url;
+    const statusUrl=feeds.find(x=>x.name==='station_status')?.url;
+    if(!infoUrl||!statusUrl) throw new Error('Flux station_information/station_status introuvables dans le GBFS TBM');
+    const [info,status]=await Promise.all([fetchOk(infoUrl).then(r=>r.json()),fetchOk(statusUrl).then(r=>r.json())]);
+    const statuses=new Map((status?.data?.stations||[]).map(x=>[String(x.station_id),x]));
+    return (info?.data?.stations||[]).map(st=>{
+      const slat=Number(st.lat),slon=Number(st.lon),d=haversineMeters(lat,lon,slat,slon),ss=statuses.get(String(st.station_id))||{};
+      return {
+        id:`tbm:${st.station_id}`,name:localizedText(st.name,'Le Vélo TBM'),network:'Le Vélo TBM',lat:slat,lon:slon,
+        distanceMeters:Math.round(d),walkMinutes:Math.ceil(walkMinutes(d,speedKmh)),
+        bikesAvailable:Number(ss.num_vehicles_available??ss.num_bikes_available??0),
+        docksAvailable:Number(ss.num_docks_available??0)
+      };
+    }).filter(x=>Number.isFinite(x.lat)&&Number.isFinite(x.lon)&&x.walkMinutes<=maxWalkMin)
+      .sort((a,b)=>a.distanceMeters-b.distanceMeters).slice(0,limit);
+  }catch(e){console.warn('Le Vélo TBM indisponible:',e.message);return[];}
+}
+
+function trainStationWalkInfo(lat,lon,speedKmh){
+  if(!sncfCache?.stops?.length)return null;
+  const station=findNearestSncfStation(sncfCache,lat,lon); if(!station)return null;
+  return {name:station.name,distanceMeters:Math.round(station.distanceMeters),walkMinutes:Math.ceil(walkMinutes(station.distanceMeters,speedKmh)),lat:station.lat,lon:station.lon};
+}
+
+
+app.get('/api/extras', async (req,res)=>{
+  const lat=Number(req.query.lat),lon=Number(req.query.lon),speedKmh=Math.min(8,Math.max(2.5,Number(req.query.speedKmh||4.8)));
+  if(!Number.isFinite(lat)||!Number.isFinite(lon))return res.status(400).json({error:'Coordonnées invalides'});
+  const radii={
+    interurban:Math.min(30,Math.max(1,Number(req.query.interurbanRadius||10))),
+    longDistance:Math.min(40,Math.max(1,Number(req.query.longDistanceRadius||15))),
+    carpool:Math.min(40,Math.max(1,Number(req.query.carpoolRadius||15))),
+    parking:Math.min(40,Math.max(1,Number(req.query.parkingRadius||15))),
+    charging:Math.min(40,Math.max(1,Number(req.query.chargingRadius||15))),
+    bus:Math.min(30,Math.max(1,Number(req.query.busRadius||10))),
+    bike:Math.min(30,Math.max(1,Number(req.query.bikeRadius||10)))
+  };
+  const locality=String(req.query.locality||'');
+  const tasks={
+    tad:loadTadInfo(locality,lat,lon),
+    tbm:getTbmNearby(lat,lon,speedKmh,radii.bus),
+    interurban:getInterurban(lat,lon,speedKmh,radii.interurban),
+    longDistance:getLongDistance(lat,lon,speedKmh,radii.longDistance),
+    carpool:getNearbyCarpool(lat,lon,speedKmh,radii.carpool),
+    parking:getNearbyParking(lat,lon,speedKmh,radii.parking),
+    charging:getNearbyIrve(lat,lon,speedKmh,radii.charging)
+  };
+  const names=Object.keys(tasks); const settled=await Promise.allSettled(Object.values(tasks)); const payload={generatedAt:new Date().toISOString(),radii,locality:localityFromLabel(locality,lat,lon),trainStationWalk:trainStationWalkInfo(lat,lon,speedKmh),errors:{}};
+  settled.forEach((x,i)=>{const n=names[i];if(x.status==='fulfilled')payload[n]=x.value;else{payload[n]=(n==='interurban'||n==='longDistance'||n==='tbm')?{stops:[]} : n==='tad'?null:[];payload.errors[n]=x.reason?.message||'Source indisponible';}});
+  res.json(payload);
+});
+
+app.get('/healthz', (_req, res) => res.status(200).json({ ok: true }));
+
+app.use(express.static('public'));
+
+app.get('/api/geocode', async (req, res) => {
+  try {
+    const q = String(req.query.q || '').trim();
+    if (!q) return res.status(400).json({ error: 'Adresse manquante' });
+    const url = new URL(GEOCODE_URL);
+    url.searchParams.set('q', q);
+    url.searchParams.set('limit', '5');
+    const r = await fetchOk(url);
+    const data = await r.json();
+    const results = (data.features || []).map(f => ({
+      label: f.properties?.label || q,
+      score: f.properties?.score,
+      lon: f.geometry?.coordinates?.[0],
+      lat: f.geometry?.coordinates?.[1]
+    }));
+    res.json({ results });
+  } catch (e) {
+    res.status(502).json({ error: `Géocodage indisponible : ${e.message}` });
+  }
+});
+
+app.get('/api/reverse-geocode', async (req, res) => {
+  try {
+    const lat = Number(req.query.lat), lon = Number(req.query.lon);
+    if (!Number.isFinite(lat) || !Number.isFinite(lon)) return res.status(400).json({ error: 'Coordonnées invalides' });
+    const url = new URL(REVERSE_GEOCODE_URL);
+    url.searchParams.set('lat', String(lat));
+    url.searchParams.set('lon', String(lon));
+    url.searchParams.set('limit', '1');
+    const r = await fetchOk(url);
+    const data = await r.json();
+    const f = data.features?.[0];
+    res.json({ result: f ? {
+      label: f.properties?.label || `Position actuelle (${lat.toFixed(5)}, ${lon.toFixed(5)})`,
+      lon: f.geometry?.coordinates?.[0] ?? lon,
+      lat: f.geometry?.coordinates?.[1] ?? lat
+    } : { label: `Position actuelle (${lat.toFixed(5)}, ${lon.toFixed(5)})`, lat, lon } });
+  } catch (e) {
+    res.status(502).json({ error: `Géocodage inverse indisponible : ${e.message}` });
+  }
+});
+
+
+app.get('/api/traffic-detail', async (req, res) => {
+  try {
+    const raw = String(req.query.url || '').trim();
+    const url = new URL(raw, STGA_ORIGIN);
+    if (url.origin !== STGA_ORIGIN || !url.pathname.startsWith('/perturbation/')) {
+      return res.status(400).json({ error: 'Lien de perturbation invalide' });
+    }
+    const r = await fetchOk(url, { redirect: 'follow' });
+    const html = await r.text();
+    const text = htmlToText(html);
+    let start = text.indexOf('\n');
+    const h1 = html.match(/<h1\b[^>]*>([\s\S]*?)<\/h1>/i);
+    const title = h1 ? htmlToText(h1[1]).replace(/\s+/g, ' ').trim() : 'Perturbation';
+    const titleIndex = text.indexOf(title);
+    if (titleIndex >= 0) start = titleIndex + title.length;
+    let detail = text.slice(Math.max(0, start)).trim();
+    for (const stop of ['Téléchargez le plan des lignes de bus', 'Service infos clients', 'Applications Mobiles']) {
+      const i = detail.indexOf(stop);
+      if (i >= 0) detail = detail.slice(0, i).trim();
+    }

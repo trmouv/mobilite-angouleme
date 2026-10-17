@@ -1,13 +1,15 @@
 {
-  "name": "mobilite-angouleme",
-  "version": "1.0.0",
+  "name": "mobilite-multireseaux",
+  "version": "1.7.0",
   "private": true,
   "type": "module",
   "scripts": {
     "start": "node server.js",
     "dev": "node --watch server.js"
   },
-  "engines": {"node": ">=18"},
+  "engines": {
+    "node": ">=18"
+  },
   "dependencies": {
     "adm-zip": "^0.5.16",
     "csv-parse": "^5.6.0",

@@ -1,0 +1,89 @@
+  for(const s of all){ const k=normalizeText(s.name); if(!merged.has(k)) merged.set(k,{...s,services:[]}); const g=merged.get(k); g.services.push(...s.services); if(s.distanceMeters<g.distanceMeters){g.distanceMeters=s.distanceMeters;g.walkMinutes=s.walkMinutes;g.lat=s.lat;g.lon=s.lon;} }
+  for(const g of merged.values()) g.services.sort((a,b)=>a.passages[0].minutes-b.passages[0].minutes);
+  return {sources,stops:[...merged.values()].sort((a,b)=>a.distanceMeters-b.distanceMeters)};
+}
+
+function localityFromLabel(label='',lat,lon){
+  const txt=String(label||'');
+  if(/bordeaux/i.test(txt))return 'Bordeaux';
+  if(/angoul[eê]me/i.test(txt))return 'Angoulême';
+  const m=txt.match(/\b\d{5}\s+([^,]+)$/); if(m)return m[1].trim();
+  if(Number.isFinite(lat)&&Number.isFinite(lon)){
+    const b=haversineMeters(lat,lon,44.8378,-0.5792),a=haversineMeters(lat,lon,45.6484,0.1562);
+    if(b<35000)return 'Bordeaux'; if(a<25000)return 'Angoulême';
+  }
+  return 'votre secteur';
+}
+async function loadTadInfo(localityLabel='',lat,lon) {
+  const locality=localityFromLabel(localityLabel,lat,lon); const key=normalizeText(locality);
+  if(key.includes('bordeaux')) return {locality:'Bordeaux',provider:"TBM flex'",service:"TBM flex'",short:'Service sur réservation, selon la zone et le service flex\'.',url:TAD_BORDEAUX_URL,phone:'05 57 57 89 99'};
+  if(key.includes('angouleme')) return {locality:'Angoulême',provider:'Möbius',service:'Transport à la demande Möbius',short:'Service sur réservation.',url:TAD_ANGOULEME_URL,phone:'05 45 65 25 35'};
+  return {locality,provider:'TAD',service:`Transport à la demande à ${locality}`,short:'Consulte les services publics locaux disponibles pour cette ville.',url:'',phone:''};
+}
+
+async function loadParkingRows() {
+  if(parkingCache.rows.length && Date.now()-parkingCache.loadedAt<EXTRA_STATIC_TTL) return parkingCache.rows;
+  const url=await discoverPanResource({datasetIncludes:['base nationale','stationnement','hors voirie'],formats:['csv'],envUrl:'PARKING_CSV_URL'});
+  if(!url) throw new Error('Base nationale des parkings introuvable');
+  const rows=[];
+  await streamCsvUrl(url,row=>{
+    const {lat,lon}=rowCoords(row); if(!Number.isFinite(lat)||!Number.isFinite(lon)) return;
+    rows.push({
+      id:String(firstField(row,['id','id_local','id_parking','identifiant'])||`${lat},${lon}`),
+      name:String(firstField(row,['nom','name','nom_parking','nom_du_parking'])||'Parking'), lat,lon,
+      address:String(firstField(row,['adresse','address','adresse_complete'])||''),
+      capacity:parseNum(firstField(row,['nb_places','nombre_places','capacite','capacity'])),
+      free:String(firstField(row,['gratuit','tarif_gratuit','free'])||''),
+      opening:String(firstField(row,['horaires','horaires_ouverture','ouverture_24h','opening_hours'])||''),
+      type:String(firstField(row,['type','type_parking','typologie'])||'')
+    });
+  });
+  parkingCache={loadedAt:Date.now(),rows,url}; return rows;
+}
+
+async function getNearbyParking(lat,lon,speedKmh,maxWalkMin){
+  const rows=await loadParkingRows();
+  return rows.map(p=>{const d=haversineMeters(lat,lon,p.lat,p.lon);return {...p,distanceMeters:Math.round(d),walkMinutes:Math.ceil(walkMinutes(d,speedKmh)),parkAndRide:/p\s*\+\s*r|relais|park\s*&\s*ride/i.test(`${p.name} ${p.type}`)}})
+    .filter(p=>p.walkMinutes<=maxWalkMin).sort((a,b)=>a.distanceMeters-b.distanceMeters).slice(0,12);
+}
+
+async function loadCarpoolRows(){
+  if(carpoolCache.rows.length && Date.now()-carpoolCache.loadedAt<EXTRA_STATIC_TTL)return carpoolCache.rows;
+  const url=await discoverPanResource({datasetIncludes:['base nationale','covoiturage'],formats:['csv'],envUrl:'CARPOOL_CSV_URL'});
+  if(!url) throw new Error('Base nationale covoiturage introuvable');
+  const rows=[];
+  await streamCsvUrl(url,row=>{ const {lat,lon}=rowCoords(row); if(!Number.isFinite(lat)||!Number.isFinite(lon))return; rows.push({id:String(firstField(row,['id_lieu','id','uuid'])||`${lat},${lon}`),name:String(firstField(row,['nom_lieu','nom','name'])||'Lieu de covoiturage'),address:String(firstField(row,['adresse','address','localisation'])||''),lat,lon,capacity:parseNum(firstField(row,['nbre_pl','nb_places','capacite']))}); });
+  carpoolCache={loadedAt:Date.now(),rows,url}; return rows;
+}
+async function getNearbyCarpool(lat,lon,speedKmh,maxWalkMin){
+  const rows=await loadCarpoolRows(); return rows.map(x=>{const d=haversineMeters(lat,lon,x.lat,x.lon);return {...x,distanceMeters:Math.round(d),walkMinutes:Math.ceil(walkMinutes(d,speedKmh))}}).filter(x=>x.walkMinutes<=maxWalkMin).sort((a,b)=>a.distanceMeters-b.distanceMeters).slice(0,12);
+}
+
+async function getNearbyIrve(lat,lon,speedKmh,maxWalkMin){
+  const cacheKey=`${lat.toFixed(3)}|${lon.toFixed(3)}|${speedKmh.toFixed(1)}|${maxWalkMin}`;
+  const cached=irveQueryCache.get(cacheKey);
+  if(cached && Date.now()-cached.loadedAt<10*60*1000) return cached.value;
+  const maxMeters=(speedKmh*1000/60)*maxWalkMin*1.15;
+  const staticUrl=await discoverPanResource({datasetIncludes:['base nationale','irve'],resourceIncludes:['consolidation'],resourceExcludes:['dynamique','dynamic'],formats:['csv'],envUrl:'IRVE_STATIC_CSV_URL'});
+  if(!staticUrl) throw new Error('Base IRVE statique introuvable');
+  const nearby=[];
+  await streamCsvUrl(staticUrl,row=>{
+    const c=rowCoords(row); if(!Number.isFinite(c.lat)||!Number.isFinite(c.lon))return;
+    const d=haversineMeters(lat,lon,c.lat,c.lon); if(d>maxMeters)return;
+    nearby.push({
+      id:String(firstField(row,['id_pdc_itinerance','id_station_itinerance','id_station','id'])||`${c.lat},${c.lon}`),
+      stationId:String(firstField(row,['id_station_itinerance','id_station'])||''),
+      name:String(firstField(row,['nom_station','nom_amenageur','nom_operateur'])||'Borne de recharge'),
+      address:String(firstField(row,['adresse_station','adresse'])||''), lat:c.lat,lon:c.lon,distanceMeters:Math.round(d),walkMinutes:Math.ceil(walkMinutes(d,speedKmh)),
+      powerKw:parseNum(firstField(row,['puissance_nominale','puissance_nominale_kw','puissance_maximale'])),
+      nbPoints:parseNum(firstField(row,['nbre_pdc','nb_points_de_charge','nombre_points_de_charge'])),
+      access:String(firstField(row,['condition_acces','accessibilite_pmr','acces_recharge'])||''), status:''
+    });
+  });
+  nearby.sort((a,b)=>a.distanceMeters-b.distanceMeters);
+  const selected=nearby.slice(0,20);
+  // Essaie d'enrichir avec la consolidation dynamique beta lorsqu'elle est publiée.
+  try{
+    const dynUrl=await discoverPanResource({datasetIncludes:['beta','irve'],resourceIncludes:['dynamiques'],formats:['csv'],envUrl:'IRVE_DYNAMIC_CSV_URL'});
+    if(dynUrl && selected.length){
+      const wanted=new Set(selected.flatMap(x=>[x.id,x.stationId]).filter(Boolean)); const statuses=new Map();

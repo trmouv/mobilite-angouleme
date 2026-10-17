@@ -1,0 +1,139 @@
+      out.push({
+        time: String(m[1]).padStart(5, '0'),
+        delayMinutes: Number(m[2] || 0),
+        destination,
+        service: serviceName,
+        trainRef,
+        platform,
+        source: 'Gares & Connexions'
+      });
+    }
+  }
+  return out;
+}
+
+async function loadGaresConnexionsDepartures(stationName='Angoulême') {
+  const slug = normalizeText(stationName).replace(/ /g,'-');
+  const stationUrl = slug === 'angouleme' ? ANGOULEME_GARES_CONNEXIONS_URL : `https://www.garesetconnexions.sncf/fr/gares-services/${slug}`;
+  const cacheKey = stationUrl;
+  if (garesConnexionsCache.key === cacheKey && Date.now() - garesConnexionsCache.loadedAt < GARES_CONNEXIONS_TTL) return garesConnexionsCache.departures;
+  try {
+    const r = await fetchOk(stationUrl, {
+      redirect: 'follow',
+      headers: {
+        'Accept': 'text/html,application/xhtml+xml',
+        'Accept-Language': 'fr-FR,fr;q=0.9'
+      }
+    });
+    const html = await r.text();
+    const departures = parseGaresConnexionsDepartures(html);
+    garesConnexionsCache = { key: cacheKey, loadedAt: Date.now(), departures };
+    return departures;
+  } catch (e) {
+    console.warn('Gares & Connexions indisponible:', e.message);
+    garesConnexionsCache = { key: cacheKey, loadedAt: Date.now(), departures: [] };
+    return [];
+  }
+}
+
+function clockMinutes(value = '') {
+  const m = String(value).match(/^(\d{1,2}):(\d{2})$/);
+  if (!m) return null;
+  return (Number(m[1]) % 24) * 60 + Number(m[2]);
+}
+
+function circularMinuteDiff(a, b) {
+  if (a == null || b == null) return Infinity;
+  const d = Math.abs(a - b);
+  return Math.min(d, 1440 - d);
+}
+
+function matchGaresConnexionsDeparture(dep, stationDepartures = []) {
+  const dest = normalizeStationDestination(dep.destination);
+  const service = String(dep.service || 'Train');
+  const scheduled = clockMinutes(dep.scheduledTime);
+  let best = null;
+  let bestScore = Infinity;
+  for (const x of stationDepartures) {
+    const xdest = normalizeStationDestination(x.destination);
+    // Destination obligatoire : évite d'affecter la voie d'un autre train.
+    if (!dest || !xdest || !(dest === xdest || dest.includes(xdest) || xdest.includes(dest))) continue;
+    const servicePenalty = (service === x.service || service === 'Train' || x.service === 'Train') ? 0 : 20;
+    const timeDiff = circularMinuteDiff(scheduled, clockMinutes(x.time));
+    if (timeDiff > 45) continue;
+    const score = timeDiff + servicePenalty;
+    if (score < bestScore) { best = x; bestScore = score; }
+  }
+  return best;
+}
+
+function sncfPlatformForStop(gtfs, stopId = '') {
+  const stop = gtfs.stopById?.get(stopId) || {};
+  const direct = String(stop.platform_code || '').trim();
+  if (direct) return direct.replace(/^voie\s*/i, '').trim();
+
+  // Fallback : certains exports encodent le quai dans le nom de l'arrêt enfant.
+  const name = String(stop.stop_name || '').trim();
+  const match = name.match(/(?:voie|quai)\s*([A-Z0-9]+)/i);
+  return match ? match[1] : '';
+}
+
+function sncfRouteMeta(gtfs, tripId, currentStopId = '', currentStationIds = new Set()) {
+  const trip = gtfs.tripById.get(tripId) || {};
+  const route = gtfs.routeById.get(trip.route_id) || {};
+  return {
+    service: sncfServiceType(gtfs, tripId),
+    destination: sncfDestinationAfterStop(gtfs, tripId, currentStopId, currentStationIds),
+    trainNumber: sncfTrainNumber(trip),
+    routeId: trip.route_id || '', routeCode: route.route_short_name || '', color: route.route_color || ''
+  };
+}
+
+async function sncfRealtimeMap(gtfs, stationIds) {
+  const byTripStop = new Map();
+  try {
+    const r = await fetchOk(SNCF_GTFS_RT_URL);
+    const feed = GtfsRealtimeBindings.transit_realtime.FeedMessage.decode(new Uint8Array(await r.arrayBuffer()));
+    const now = Math.floor(Date.now()/1000);
+    for (const entity of feed.entity || []) {
+      const tu = entity.tripUpdate, tripId = tu?.trip?.tripId;
+      if (!tripId) continue;
+      for (const stu of tu.stopTimeUpdate || []) {
+        if (!stationIds.has(stu.stopId)) continue;
+        const epoch = Number(stu.departure?.time || stu.arrival?.time || 0);
+        if (!epoch || epoch < now - 120 || epoch > now + 8 * 3600) continue;
+        byTripStop.set(`${tripId}|${stu.stopId}`, epoch);
+        if (!byTripStop.has(`${tripId}|*`)) byTripStop.set(`${tripId}|*`, epoch);
+      }
+    }
+  } catch (e) { console.warn('SNCF GTFS-RT indisponible:', e.message); }
+  return byTripStop;
+}
+
+async function getNearestTrainDepartures(lat, lon, limit = 12, speedKmh=4.8) {
+  const gtfs = await loadSncfGtfs();
+  const station = findNearestSncfStation(gtfs,lat,lon);
+  if (!station) return { station:null, departures:[] };
+  const active = sncfActiveServices(gtfs), { seconds } = parisParts(), nowEpoch=Math.floor(Date.now()/1000);
+  const stationTimes=[];
+  for (const stopId of station.stationIds) for (const st of gtfs.stopTimesByStop.get(stopId)||[]) stationTimes.push(st);
+  stationTimes.sort((a,b)=>gtfsTimeToSeconds(a.departure_time||a.arrival_time)-gtfsTimeToSeconds(b.departure_time||b.arrival_time));
+  const [rt, stationLive] = await Promise.all([sncfRealtimeMap(gtfs,station.stationIds), loadGaresConnexionsDepartures(station.name)]);
+  const out=[], seen=new Set();
+  for (const st of stationTimes) {
+    const depSec=gtfsTimeToSeconds(st.departure_time||st.arrival_time);
+    if(depSec==null||depSec<seconds-120||depSec>seconds+8*3600) continue;
+    const trip=gtfs.tripById.get(st.trip_id); if(!trip||!active.has(trip.service_id)) continue;
+    const dedupe=`${st.trip_id}|${depSec}`; if(seen.has(dedupe))continue; seen.add(dedupe);
+    const meta=sncfRouteMeta(gtfs,st.trip_id,st.stop_id,station.stationIds); if(!meta.destination)continue;
+    const scheduledTime=formatGtfsClock(st.departure_time||st.arrival_time), realtimeEpoch=rt.get(`${st.trip_id}|${st.stop_id}`)||rt.get(`${st.trip_id}|*`)||0;
+    const scheduledEpoch=nowEpoch+(depSec-seconds); let delayMinutes=realtimeEpoch?Math.max(0,Math.round((realtimeEpoch-scheduledEpoch)/60)):0;
+    const stationMatch=matchGaresConnexionsDeparture({...meta,scheduledTime},stationLive); if(stationMatch?.delayMinutes>0)delayMinutes=stationMatch.delayMinutes;
+    const platform=stationMatch?.platform||sncfPlatformForStop(gtfs,st.stop_id)||'';
+    out.push({tripId:st.trip_id,...meta,scheduledTime,realtime:Boolean(realtimeEpoch||stationMatch),epoch:realtimeEpoch||null,delayMinutes,platform,platformSource:stationMatch?.platform?'Gares & Connexions':(platform?'GTFS':''),stationLive:Boolean(stationMatch),minutes:realtimeEpoch?Math.max(0,Math.round((realtimeEpoch-nowEpoch)/60)):Math.max(0,Math.round((depSec-seconds)/60)),sortEpoch:realtimeEpoch||scheduledEpoch});
+  }
+  out.sort((a,b)=>a.sortEpoch-b.sortEpoch);
+  return {station:{name:station.name,lat:station.lat,lon:station.lon,distanceMeters:Math.round(station.distanceMeters),walkMinutes:Math.ceil(walkMinutes(station.distanceMeters,speedKmh))},departures:out.slice(0,limit)};
+}
+
+

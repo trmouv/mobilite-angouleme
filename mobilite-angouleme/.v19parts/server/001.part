@@ -1,0 +1,171 @@
+import express from 'express';
+import AdmZip from 'adm-zip';
+import { parse } from 'csv-parse/sync';
+import { parse as parseCsvStream } from 'csv-parse';
+import { Readable } from 'node:stream';
+import GtfsRealtimeBindings from 'gtfs-realtime-bindings';
+
+const app = express();
+const PORT = process.env.PORT || 3000;
+
+const GTFS_STATIC_URL = 'https://www.data.gouv.fr/api/1/datasets/r/021fd4a3-ba9a-4d78-aa65-71d4d289f389';
+const GTFS_RT_URL = 'https://proxy.transport.data.gouv.fr/resource/mobius-angouleme';
+const BIKE_INFO_URL = 'https://gbfs.partners.fifteen.eu/gbfs/2.2/angouleme/en/station_information.json';
+const BIKE_STATUS_URL = 'https://gbfs.partners.fifteen.eu/gbfs/2.2/angouleme/en/station_status.json';
+const GEOCODE_URL = 'https://data.geopf.fr/geocodage/search/';
+const REVERSE_GEOCODE_URL = 'https://data.geopf.fr/geocodage/reverse/';
+const STGA_TRAFFIC_URL = 'https://www.stga.fr/';
+const STGA_ORIGIN = 'https://www.stga.fr';
+const SNCF_GTFS_STATIC_URL = 'https://eu.ftp.opendatasoft.com/sncf/plandata/Export_OpenData_SNCF_GTFS_NewTripId.zip';
+const SNCF_GTFS_RT_URL = 'https://proxy.transport.data.gouv.fr/resource/sncf-gtfs-rt-trip-updates';
+const ANGOULEME_GARES_CONNEXIONS_URL = 'https://www.garesetconnexions.sncf/fr/gares-services/angouleme';
+const TBM_GTFS_STATIC_URL = 'https://bdx.mecatran.com/utw/ws/gtfsfeed/static/bordeaux?apiKey=opendata-bordeaux-metropole-flux-gtfs-rt';
+const TBM_GTFS_RT_URL = 'https://bdx.mecatran.com/utw/ws/gtfsfeed/realtime/bordeaux?apiKey=opendata-bordeaux-metropole-flux-gtfs-rt';
+const TBM_GTFS_ALERTS_URL = 'https://bdx.mecatran.com/utw/ws/gtfsfeed/alerts/bordeaux?apiKey=opendata-bordeaux-metropole-flux-gtfs-rt';
+const TBM_GBFS_URL = 'https://bdx.mecatran.com/utw/ws/gbfs/bordeaux/v3/gbfs.json?apiKey=opendata-bordeaux-metropole-flux-gtfs-rt';
+
+let gtfsCache = null;
+let gtfsLoadedAt = 0;
+const STATIC_TTL = 12 * 60 * 60 * 1000;
+let trafficCache = { loadedAt: 0, alerts: [] };
+const TRAFFIC_TTL = 2 * 60 * 1000;
+let sncfCache = null;
+let sncfLoadedAt = 0;
+const SNCF_STATIC_TTL = 12 * 60 * 60 * 1000;
+let garesConnexionsCache = { loadedAt: 0, departures: [] };
+const GARES_CONNEXIONS_TTL = 30 * 1000;
+
+function haversineMeters(lat1, lon1, lat2, lon2) {
+  const R = 6371000;
+  const toRad = d => d * Math.PI / 180;
+  const dLat = toRad(lat2 - lat1);
+  const dLon = toRad(lon2 - lon1);
+  const a = Math.sin(dLat / 2) ** 2 + Math.cos(toRad(lat1)) * Math.cos(toRad(lat2)) * Math.sin(dLon / 2) ** 2;
+  return 2 * R * Math.atan2(Math.sqrt(a), Math.sqrt(1 - a));
+}
+
+function walkMinutes(distanceMeters, speedKmh = 4.8) {
+  return (distanceMeters / 1000) / speedKmh * 60;
+}
+
+function parisParts(date = new Date()) {
+  const p = new Intl.DateTimeFormat('en-CA', {
+    timeZone: 'Europe/Paris', year: 'numeric', month: '2-digit', day: '2-digit',
+    weekday: 'short', hour: '2-digit', minute: '2-digit', second: '2-digit', hourCycle: 'h23'
+  }).formatToParts(date);
+  const o = Object.fromEntries(p.map(x => [x.type, x.value]));
+  return {
+    ymd: `${o.year}${o.month}${o.day}`,
+    weekday: o.weekday.toLowerCase().slice(0, 3),
+    seconds: Number(o.hour) * 3600 + Number(o.minute) * 60 + Number(o.second)
+  };
+}
+
+function gtfsTimeToSeconds(s) {
+  if (!s) return null;
+  const [h, m, sec] = s.split(':').map(Number);
+  return h * 3600 + m * 60 + sec;
+}
+
+function formatGtfsClock(s) {
+  const sec = gtfsTimeToSeconds(s);
+  if (sec == null) return '';
+  const h = Math.floor((sec % 86400) / 3600);
+  const m = Math.floor((sec % 3600) / 60);
+  return `${String(h).padStart(2, '0')}:${String(m).padStart(2, '0')}`;
+}
+
+async function fetchOk(url, options = {}) {
+  const r = await fetch(url, { ...options, headers: { 'User-Agent': 'MobiliteAngouleme/1.0', ...(options.headers || {}) } });
+  if (!r.ok) throw new Error(`${r.status} ${r.statusText} pour ${url}`);
+  return r;
+}
+
+function zipCsv(zip, name) {
+  const entry = zip.getEntry(name);
+  if (!entry) return [];
+  return parse(entry.getData().toString('utf8'), { columns: true, skip_empty_lines: true, relax_column_count: true, bom: true });
+}
+
+
+function decodeHtmlEntities(value = '') {
+  return String(value)
+    .replace(/&nbsp;|&#160;/gi, ' ')
+    .replace(/&amp;/gi, '&')
+    .replace(/&quot;/gi, '"')
+    .replace(/&#39;|&apos;/gi, "'")
+    .replace(/&lt;/gi, '<')
+    .replace(/&gt;/gi, '>')
+    .replace(/&#(\d+);/g, (_, n) => String.fromCodePoint(Number(n)))
+    .replace(/&#x([0-9a-f]+);/gi, (_, n) => String.fromCodePoint(parseInt(n, 16)));
+}
+
+function htmlToText(html = '') {
+  return decodeHtmlEntities(String(html)
+    .replace(/<script\b[^>]*>[\s\S]*?<\/script>/gi, ' ')
+    .replace(/<style\b[^>]*>[\s\S]*?<\/style>/gi, ' ')
+    .replace(/<br\s*\/?>/gi, '\n')
+    .replace(/<\/p>|<\/li>|<\/h[1-6]>|<\/div>|<\/section>|<\/article>/gi, '\n')
+    .replace(/<[^>]+>/g, ' '))
+    .replace(/[ \t]+/g, ' ')
+    .replace(/\n\s+/g, '\n')
+    .replace(/\n{3,}/g, '\n\n')
+    .trim();
+}
+
+function normalizeRouteToken(value = '') {
+  return String(value).replace(/[,:;|()\[\]]/g, '').trim().toUpperCase();
+}
+
+async function loadTrafficAlerts(validRoutes = new Set()) {
+  if (trafficCache.alerts.length && Date.now() - trafficCache.loadedAt < TRAFFIC_TTL) return trafficCache.alerts;
+  try {
+    const r = await fetchOk(STGA_TRAFFIC_URL, { redirect: 'follow' });
+    const html = await r.text();
+    const alerts = [];
+    const seen = new Set();
+    const re = /<a\b[^>]*href=["']([^"']*\/perturbation\/[^"']+)["'][^>]*>([\s\S]*?)<\/a>/gi;
+    let m;
+    while ((m = re.exec(html))) {
+      const href = decodeHtmlEntities(m[1]);
+      const title = htmlToText(m[2]).replace(/\s+/g, ' ').trim();
+      if (!title || seen.has(href)) continue;
+
+      // Sur la page d'accueil STGA, les pastilles de lignes sont placées juste
+      // avant le lien de perturbation. On lit uniquement la fin de ce préfixe
+      // et on ne conserve que des noms de lignes réellement présents dans le GTFS.
+      const prefix = htmlToText(html.slice(Math.max(0, m.index - 900), m.index));
+      const tokens = prefix.split(/\s+/).filter(Boolean);
+      const routes = [];
+      for (let i = tokens.length - 1; i >= 0; i--) {
+        const token = normalizeRouteToken(tokens[i]);
+        if (validRoutes.has(token)) routes.unshift(token);
+        else if (routes.length) break;
+        else if (tokens.length - i > 8) break;
+      }
+      if (!routes.length) continue;
+
+      seen.add(href);
+      alerts.push({
+        id: href,
+        title,
+        url: new URL(href, STGA_ORIGIN).toString(),
+        routes: [...new Set(routes)]
+      });
+    }
+    trafficCache = { loadedAt: Date.now(), alerts };
+    return alerts;
+  } catch (e) {
+    console.warn('Infos trafic STGA indisponibles:', e.message);
+    return trafficCache.alerts || [];
+  }
+}
+
+function disruptionsForRoute(alerts, route) {
+  const key = normalizeRouteToken(route);
+  return alerts
+    .filter(a => a.routes.includes(key))
+    .map(a => ({ id: a.id, title: a.title, url: a.url }));
+}
+
+async function loadGtfs() {
