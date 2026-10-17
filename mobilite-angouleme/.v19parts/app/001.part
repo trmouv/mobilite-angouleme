@@ -15,6 +15,19 @@ function getBusRadius(){ return Number($('#busRadius').value || 10); }
 function getBikeRadius(){ return Number($('#bikeRadius').value || 10); }
 function getRadius(id, fallback){ return Number($(id)?.value || fallback); }
 
+async function readJsonResponse(response, label='requête'){
+  const text = await response.text();
+  if (!text.trim()) {
+    throw new Error(`${label} : réponse vide du serveur (${response.status || 'sans statut'})`);
+  }
+  try {
+    return JSON.parse(text);
+  } catch {
+    const preview = text.replace(/\s+/g,' ').trim().slice(0,140);
+    throw new Error(`${label} : réponse serveur invalide${preview ? ` — ${preview}` : ''}`);
+  }
+}
+
 function groupRouteRows(rows=[]){
   // Conserve l'ordre de première apparition des lignes. Si une même ligne
   // dessert plusieurs destinations, elle garde son emplacement d'origine et
@@ -86,7 +99,7 @@ function closeSettings(){
 
 async function geocode(address){
   const r = await fetch(`/api/geocode?q=${encodeURIComponent(address)}`);
-  const j = await r.json();
+  const j = await readJsonResponse(r, 'Recherche d’adresse');
   if(!r.ok || !j.results?.length) throw new Error(j.error || 'Adresse introuvable');
   return j.results[0];
 }
@@ -94,7 +107,7 @@ async function geocode(address){
 async function reverseGeocode(lat, lon){
   try{
     const r = await fetch(`/api/reverse-geocode?lat=${encodeURIComponent(lat)}&lon=${encodeURIComponent(lon)}`);
-    const j = await r.json();
+    const j = await readJsonResponse(r, 'Géolocalisation');
     if(r.ok && j.result) return j.result;
   }catch{}
   return { lat, lon, label: `Position actuelle (${lat.toFixed(5)}, ${lon.toFixed(5)})` };
@@ -108,8 +121,8 @@ async function loadMobility(){
   const bikeRadius = getBikeRadius();
   const url = `/api/mobility?lat=${state.home.lat}&lon=${state.home.lon}&speedKmh=${speed}&maxBusWalkMin=${busRadius}&maxBikeWalkMin=${bikeRadius}&bikeLimit=4`;
   const [mobilityResult, trainsResult] = await Promise.allSettled([
-    fetch(url).then(async r => { const j = await r.json(); if(!r.ok) throw new Error(j.error || 'Données mobilité indisponibles'); return j; }),
-    fetch(`/api/trains?limit=28&lat=${encodeURIComponent(state.home.lat)}&lon=${encodeURIComponent(state.home.lon)}&speedKmh=${encodeURIComponent(speed)}`).then(async r => { const j = await r.json(); if(!r.ok) throw new Error(j.error || 'Horaires SNCF indisponibles'); return j; })
+    fetch(url).then(async r => { const j = await readJsonResponse(r, 'Données mobilité'); if(!r.ok) throw new Error(j.error || 'Données mobilité indisponibles'); return j; }),
+    fetch(`/api/trains?limit=28&lat=${encodeURIComponent(state.home.lat)}&lon=${encodeURIComponent(state.home.lon)}&speedKmh=${encodeURIComponent(speed)}`).then(async r => { const j = await readJsonResponse(r, 'Horaires SNCF'); if(!r.ok) throw new Error(j.error || 'Horaires SNCF indisponibles'); return j; })
   ]);
   if (mobilityResult.status === 'rejected') throw mobilityResult.reason;
   state.data = mobilityResult.value;
@@ -128,21 +141,3 @@ async function loadExtras(){
     const q = new URLSearchParams({
       lat:state.home.lat, lon:state.home.lon, speedKmh:$('#speed').value,
       interurbanRadius:getRadius('#interurbanRadius',10),
-      longDistanceRadius:getRadius('#longDistanceRadius',15),
-      carpoolRadius:getRadius('#carpoolRadius',15),
-      parkingRadius:getRadius('#parkingRadius',15),
-      chargingRadius:getRadius('#chargingRadius',15),
-      busRadius:getBusRadius(), bikeRadius:getBikeRadius(),
-      locality:state.home.label||''
-    });
-    const r=await fetch(`/api/extras?${q}`); const j=await r.json();
-    if(!r.ok) throw new Error(j.error || 'Données complémentaires indisponibles');
-    state.extras=j;
-  }catch(e){ state.extras={errors:{global:e.message}}; }
-  finally{ state.extrasLoading=false; renderSupplementary(); renderBestOption(); }
-}
-
-function render(){
-  const buffer = Number($('#buffer').value);
-  const busRadius = getBusRadius();
-  const bikeRadius = getBikeRadius();
