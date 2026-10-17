@@ -1,3 +1,40 @@
+document.addEventListener('keydown',e=>{ if(e.key==='Escape') closeSettings(); });
+$('#themeToggle').addEventListener('click',()=>applyTheme(document.documentElement.dataset.theme === 'dark' ? 'light' : 'dark'));
+$('#speed').addEventListener('change',()=>{ localStorage.setItem('walkSpeed',$('#speed').value); loadMobility().catch(e=>setStatus(e.message,true)); });
+$('#buffer').addEventListener('change',()=>{ localStorage.setItem('busBuffer',$('#buffer').value); render(); });
+$('#busRadius').addEventListener('input',()=>{ $('#busRadiusValue').textContent=$('#busRadius').value; });
+$('#busRadius').addEventListener('change',()=>{ localStorage.setItem('busWalkRadius',$('#busRadius').value); loadMobility().catch(e=>setStatus(e.message,true)); });
+$('#bikeRadius').addEventListener('input',()=>{ $('#bikeRadiusValue').textContent=$('#bikeRadius').value; });
+$('#bikeRadius').addEventListener('change',()=>{ localStorage.setItem('bikeWalkRadius',$('#bikeRadius').value); loadMobility().catch(e=>setStatus(e.message,true)); });
+
+const radiusSettings=[
+  ['#interurbanRadius','#interurbanRadiusValue','interurbanWalkRadius','10'],
+  ['#longDistanceRadius','#longDistanceRadiusValue','longDistanceWalkRadius','15'],
+  ['#carpoolRadius','#carpoolRadiusValue','carpoolWalkRadius','15'],
+  ['#parkingRadius','#parkingRadiusValue','parkingWalkRadius','15'],
+  ['#chargingRadius','#chargingRadiusValue','chargingWalkRadius','15']
+];
+for(const [sel,label,key] of radiusSettings){
+  $(sel)?.addEventListener('input',()=>{$(label).textContent=$(sel).value;});
+  $(sel)?.addEventListener('change',()=>{localStorage.setItem(key,$(sel).value); state.extras=null; loadExtras().catch(()=>{});});
+}
+
+$('#buses').addEventListener('click', async e => {
+  const disruptionBtn = e.target.closest('.disruption-toggle');
+  if (disruptionBtn) {
+    const details = disruptionBtn.nextElementSibling;
+    const isOpen = disruptionBtn.getAttribute('aria-expanded') === 'true';
+    disruptionBtn.setAttribute('aria-expanded', String(!isOpen));
+    details.hidden = isOpen;
+    if (!isOpen && !details.dataset.loaded) {
+      details.innerHTML = '<div class="disruption-loading">Chargement des informations…</div>';
+      try {
+        const alerts = JSON.parse(disruptionBtn.dataset.alerts || '[]');
+        const blocks = await Promise.all(alerts.map(async alert => {
+          try {
+            const r = await fetch(`/api/traffic-detail?url=${encodeURIComponent(alert.url)}`);
+            const j = await readJsonResponse(r, 'Détails perturbation');
+            if (!r.ok) throw new Error(j.error || 'Détail indisponible');
             return `<article class="disruption-item"><h4>${esc(j.title || alert.title)}</h4><div class="disruption-text">${esc(j.detail || '').replace(/\n/g,'<br>')}</div><a href="${escAttr(j.url || alert.url)}" target="_blank" rel="noopener noreferrer">Voir l’information officielle ↗</a></article>`;
           } catch {
             return `<article class="disruption-item"><h4>${esc(alert.title)}</h4><a href="${escAttr(alert.url)}" target="_blank" rel="noopener noreferrer">Voir l’information officielle ↗</a></article>`;
