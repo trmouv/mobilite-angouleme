@@ -1,3 +1,32 @@
+      <div class="service-badge ${operatorClass(x.operator)}">${esc(x.operator||x.line||'Car')}</div>
+      <div class="service-main"><div class="service-destination">${x.line && String(x.line).trim().toLowerCase()!==String(x.operator||'').trim().toLowerCase() ? `<span class="line-code">${esc(x.line)}</span> `:''}${esc(x.destination)}</div>
+      <div class="service-times">${(x.passages||[]).slice(0,4).map(p=>`<span>${esc(fmtCoachTime(p.time))}</span>`).join('')}</div></div>
+    </div>`).join('')}</div>
+  </article>`).join('');
+}
+function operatorClass(op=''){
+  const s=String(op).toLowerCase(); if(s.includes('flix')) return 'op-flix'; if(s.includes('blabla')) return 'op-blabla'; if(s.includes('région')||s.includes('region')) return 'op-region'; return '';
+}
+function statusLabel(raw=''){
+  const s=String(raw).toLowerCase();
+  if(/available|disponible|libre|operative|operational/.test(s)) return 'Disponible';
+  if(/occupied|occupe|busy/.test(s)) return 'Occupée';
+  if(/out|indisponible|hors|fault|maintenance/.test(s)) return 'Indisponible';
+  return raw;
+}
+function sourceError(name){ return state.extras?.errors?.[name] ? `<div class="source-note">Source temporairement indisponible : ${esc(state.extras.errors[name])}</div>` : ''; }
+
+function renderSupplementary(){
+  const loading = state.extrasLoading && !state.extras;
+  if(loading){
+    for(const id of ['tad','interurban','longDistance','carpool','parking','charging']) if($("#"+id)) $("#"+id).innerHTML='<div class="empty">Chargement des données publiques…</div>';
+    return;
+  }
+  const x=state.extras||{};
+  const tad=x.tad;
+  const locality=tad?.locality||x.locality||'votre secteur';
+  if($('#tadTitle')) $('#tadTitle').textContent=`Transport à la demande à ${locality}`;
+  if($('#tadLabel')) $('#tadLabel').textContent=tad?.provider||'sur réservation';
   $('#tad').innerHTML=tad ? `<article class="card info-card compact-info"><h3>${esc(tad.service||tad.provider||'Transport à la demande')}</h3>${tad.short?`<p>${esc(tad.short)}</p>`:''}<div class="info-actions">${tad.phone?`<a class="secondary-link" href="tel:${String(tad.phone).replace(/\s/g,'')}">☎ ${esc(tad.phone)}</a>`:''}${tad.url?`<a class="secondary-link" href="${escAttr(tad.url)}" target="_blank" rel="noopener noreferrer">Voir / réserver ↗</a>`:''}</div></article>` : `<div class="empty">Aucune information TAD publique intégrée pour ${esc(locality)}.</div>${sourceError('tad')}`;
   renderUrbanTransit();
 
@@ -18,9 +47,3 @@ function renderBestOption(){
   for(const s of state.data.busStops||[]){
     for(const d of s.directions||[]){ for(const r of d.routeDirections||[]){ const p=r.passages?.[0]; if(!p)continue; const mins=Number(p.minutes); const leave=mins-s.walkMinutes-buffer; if(leave>=0) options.push({kind:'Bus',icon:'🚌',title:`${r.route} · ${r.headsign||''}`,subtitle:`Arrêt ${s.name} · ${s.walkMinutes} min à pied`,when:p.realtime?(mins===0?'à l’arrêt':mins===1?'proche':`dans ${mins} min`):p.time,leave,score:leave}); } }
   }
-  const bike=(state.data.bikes||[]).find(b=>b.bikesAvailable>0); if(bike) options.push({kind:'Vélo',icon:'🚲',title:bike.name,subtitle:`${bike.bikesAvailable} vélo${bike.bikesAvailable>1?'s':''} disponible${bike.bikesAvailable>1?'s':''}`,when:`${bike.walkMinutes} min à pied`,leave:bike.walkMinutes,score:bike.walkMinutes+2});
-  const stationWalk=state.extras?.trainStationWalk?.walkMinutes; const firstTrain=state.trains?.departures?.[0]; if(Number.isFinite(stationWalk)&&firstTrain){ const now=Date.now()/1000; const mins=firstTrain.epoch?Math.max(0,Math.round((Number(firstTrain.epoch)-now)/60)):null; if(mins==null||mins>=stationWalk+buffer) options.push({kind:'Train',icon:'🚆',title:`${firstTrain.service||'Train'} · ${firstTrain.destination||''}`,subtitle:`${state.trains?.station || 'Gare la plus proche'} · ${stationWalk} min à pied`,when:trainClockFromDeparture(firstTrain),leave:mins==null?stationWalk:Math.max(0,mins-stationWalk-buffer),score:mins==null?stationWalk+20:Math.max(0,mins-stationWalk-buffer)}); }
-  for(const s of state.extras?.tbm?.stops||[]){ const svc=s.services?.[0],p=svc?.passages?.[0]; if(!p)continue; const leave=p.minutes-s.walkMinutes-buffer; if(leave>=0) options.push({kind:`TBM ${svc.mode||''}`.trim(),icon:svc.mode==='Tram'?'🚊':svc.mode==='Métro'?'🚇':svc.mode==='Bateau'?'⛴️':'🚌',title:`${svc.line||''} · ${svc.destination}`,subtitle:`${s.name} · ${s.walkMinutes} min à pied`,when:p.realtime?(p.minutes===0?'à l’arrêt':p.minutes===1?'proche':`dans ${p.minutes} min`):fmtCoachTime(p.time),leave,score:leave}); }
-  for(const [kind,data,icon] of [['Car interurbain',state.extras?.interurban,'🚌'],['Car longue distance',state.extras?.longDistance,'🧳']]){ for(const s of data?.stops||[]){ const svc=s.services?.[0],p=svc?.passages?.[0]; if(!p)continue; const leave=p.minutes-s.walkMinutes-buffer; if(leave>=0) options.push({kind,icon,title:`${svc.operator||svc.line||kind} · ${svc.destination}`,subtitle:`${s.name} · ${s.walkMinutes} min à pied`,when:fmtCoachTime(p.time),leave,score:leave}); } }
-  options.sort((a,b)=>a.score-b.score); const best=options[0],alt=options.slice(1,4);
-  if(!best){ target.innerHTML='<div class="empty">Aucune option attrapable immédiatement avec les données disponibles.</div>'; return; }
