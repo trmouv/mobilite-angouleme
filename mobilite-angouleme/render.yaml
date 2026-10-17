@@ -1,0 +1,9 @@
+services:
+  - type: web
+    name: mobilite-angouleme
+    runtime: node
+    plan: free
+    buildCommand: npm install
+    startCommand: npm start
+    healthCheckPath: /healthz
+    autoDeploy: true

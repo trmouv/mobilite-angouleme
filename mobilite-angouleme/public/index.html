@@ -1,0 +1,77 @@
+<!doctype html>
+<html lang="fr">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <meta name="theme-color" content="#111827" />
+  <meta name="apple-mobile-web-app-capable" content="yes" />
+  <meta name="apple-mobile-web-app-status-bar-style" content="default" />
+  <meta name="apple-mobile-web-app-title" content="Mobilité" />
+  <link rel="manifest" href="/manifest.webmanifest" />
+  <title>Mobilité autour de chez moi — Angoulême</title>
+  <link rel="stylesheet" href="/styles.css" />
+</head>
+<body>
+  <main class="shell">
+    <header>
+      <div>
+        <p class="eyebrow">ANGOULÊME · MOBIUS + VÉLO MODALIS</p>
+        <h1>Mes départs à proximité</h1>
+        <p class="lede">Bus en temps réel, vélos disponibles et heure idéale pour partir de chez toi.</p>
+      </div>
+      <div class="header-actions">
+        <button id="installApp" class="ghost install-hidden" type="button">Installer</button>
+        <button id="refresh" class="ghost" type="button">Actualiser</button>
+      </div>
+    </header>
+
+    <section class="panel settings">
+      <label class="address-label" for="address">Adresse du domicile</label>
+      <div class="address-row">
+        <input id="address" autocomplete="street-address" value="165 avenue Gambetta 16000 Angoulême" />
+        <button id="saveAddress">Utiliser cette adresse</button>
+      </div>
+      <p id="geocodeState" class="muted">Adresse modifiable à tout moment. Elle est enregistrée uniquement dans ce navigateur.</p>
+      <div class="controls">
+        <label>Marche
+          <select id="speed">
+            <option value="4">tranquille · 4 km/h</option>
+            <option value="4.8" selected>normale · 4,8 km/h</option>
+            <option value="5.5">rapide · 5,5 km/h</option>
+          </select>
+        </label>
+        <label>Marge avant bus
+          <select id="buffer">
+            <option value="1">1 min</option>
+            <option value="2" selected>2 min</option>
+            <option value="3">3 min</option>
+            <option value="5">5 min</option>
+          </select>
+        </label>
+        <div class="rule"><strong>Rayon</strong><span>10 min à pied</span></div>
+      </div>
+    </section>
+
+    <div id="status" class="status">Localisation de ton domicile…</div>
+
+    <section>
+      <div class="section-title">
+        <div><span class="icon">🚲</span><h2>Vélos à proximité</h2></div>
+        <span class="pill">4 stations max · ≤ 10 min</span>
+      </div>
+      <div id="bikes" class="grid"></div>
+    </section>
+
+    <section>
+      <div class="section-title">
+        <div><span class="icon">🚌</span><h2>Arrêts de bus à proximité</h2></div>
+        <span id="busCount" class="pill">≤ 10 min à pied</span>
+      </div>
+      <div id="buses" class="stack"></div>
+    </section>
+
+    <footer><span>Application web responsive · installable sur l’écran d’accueil.</span><br>Les temps de marche sont estimés à vol d’oiseau selon ta vitesse de marche. Prévois davantage de marge si le trajet réel comporte détours, feux ou dénivelé.</footer>
+  </main>
+  <script src="/app.js" defer></script>
+</body>
+</html>

@@ -1,0 +1,11 @@
+{
+  "name": "Mobilité Angoulême",
+  "short_name": "Mobilité",
+  "description": "Bus Möbius, vélos Modalis et heure idéale de départ autour de chez moi.",
+  "start_url": "/",
+  "scope": "/",
+  "display": "standalone",
+  "background_color": "#f4f6f8",
+  "theme_color": "#111827",
+  "lang": "fr-FR"
+}
