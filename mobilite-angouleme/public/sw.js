@@ -1,4 +1,4 @@
-const CACHE = 'mobilite-multireseaux-v19';
+const CACHE = 'mobilite-multireseaux-v19-jsonfix';
 const SHELL = ['/', '/styles.css', '/app.js', '/manifest.webmanifest', '/train-logos/ter.svg', '/train-logos/tgv-inoui.svg', '/train-logos/intercites.svg', '/train-logos/ouigo.svg'];
 
 self.addEventListener('install', event => {
