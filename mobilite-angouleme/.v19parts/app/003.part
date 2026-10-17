@@ -1,3 +1,12 @@
+  const rowsHtml=rows.length?rows.map(r=>`<div class="arrival route-row"><div class="route" ${r.color?`style="background:#${safeColor(r.color)}"`:''}>${esc(r.route)}</div><div class="route-main">${r.disruptions?.length?`<button class="disruption-toggle" type="button" data-route="${esc(r.route)}" data-alerts='${escAttr(JSON.stringify(r.disruptions))}' aria-expanded="false"><span class="disruption-icon" aria-hidden="true">!</span><span>Perturbations</span></button><div class="disruption-details" hidden></div>`:''}${r.directions.map((d,di)=>{const passages=d.passages.slice(0,3);return `<div class="route-direction ${di?'route-direction-next':''}"><div class="headsign">${esc(d.headsign)}</div><div class="passage-list">${passages.map((p,idx)=>p.realtime?`<span class="passage realtime-passage"><span class="live-dot" aria-label="Donnée actualisée"></span><strong>${p.minutes===0?'à l’arrêt':p.minutes===1?'proche':idx===0?`dans ${p.minutes} min`:`${p.minutes} min`}</strong></span>`:`<span class="passage scheduled-passage"><strong>${esc(p.time)}</strong></span>`).join('')}</div>${passages[0]?.realtime?`<div class="leave-advice">Départ conseillé : <strong>${leaveClock(passages[0],s.walkMinutes,buffer)}</strong></div>`:''}</div>`}).join('')}</div></div>`).join(''):futureRows.length?`<div class="future-window">${futureRows.map(r=>`<div class="arrival route-row future-arrival"><div class="route" ${r.color?`style="background:#${safeColor(r.color)}"`:''}>${esc(r.route)}</div><div class="route-main">${r.directions.map((d,di)=>`<div class="route-direction ${di?'route-direction-next':''}"><div class="headsign">${esc(d.headsign)}</div><div class="passage-list">${d.passages.slice(0,3).map(p=>`<span class="passage scheduled-passage"><strong>${esc(p.time)}</strong></span>`).join('')}</div></div>`).join('')}</div></div>`).join('')}</div>`:'<div class="empty">Aucun passage prévu dans les 6 prochaines heures pour cette direction.</div>';
+  return `<article class="bus-card" data-distance="${s.distanceMeters}"><div class="bus-head"><div class="stop-title-wrap"><span class="rank">#${i+1} · ${fmtDistance(s.distanceMeters)} · Möbius</span><div class="stop-title-row"><h3>${esc(s.name)}</h3>${canSwitch?`<button class="direction-toggle" type="button" data-stop-id="${esc(s.id)}" aria-label="Changer la direction à ${esc(s.name)}">↔ Direction</button>`:''}</div><div class="direction-label">${esc(direction.label)}${canSwitch?` <span>${selected+1}/${directions.length}</span>`:''}</div></div><div class="walk">🚶 ${s.walkMinutes} min</div></div><div class="arrivals">${rowsHtml}</div></article>`;
+}
+function groupTbmServices(services=[]){
+  const groups = new Map();
+  for (const service of services) {
+    const mode = String(service.mode || 'Transport').trim();
+    const line = String(service.line || '').trim();
+    const key = `${mode.toUpperCase()}|${line.toUpperCase()}`;
     if (!groups.has(key)) groups.set(key, { mode, line, color: service.color || '', destinations: [], alerts: [] });
     const group = groups.get(key);
     if (!group.color && service.color) group.color = service.color;
@@ -50,32 +59,3 @@ function renderTransitStops(stops=[], emptyText='Aucun départ trouvé dans ce r
   return stops.map((s,i)=>`<article class="bus-card compact-card">
     <div class="bus-head"><div><span class="rank">#${i+1} · ${fmtDistance(s.distanceMeters)}</span><h3>${esc(s.name)}</h3></div><div class="walk">🚶 ${s.walkMinutes} min</div></div>
     <div class="service-list">${(s.services||[]).slice(0,8).map(x=>`<div class="service-row">
-      <div class="service-badge ${operatorClass(x.operator)}">${esc(x.operator||x.line||'Car')}</div>
-      <div class="service-main"><div class="service-destination">${x.line && String(x.line).trim().toLowerCase()!==String(x.operator||'').trim().toLowerCase() ? `<span class="line-code">${esc(x.line)}</span> `:''}${esc(x.destination)}</div>
-      <div class="service-times">${(x.passages||[]).slice(0,4).map(p=>`<span>${esc(fmtCoachTime(p.time))}</span>`).join('')}</div></div>
-    </div>`).join('')}</div>
-  </article>`).join('');
-}
-function operatorClass(op=''){
-  const s=String(op).toLowerCase(); if(s.includes('flix')) return 'op-flix'; if(s.includes('blabla')) return 'op-blabla'; if(s.includes('région')||s.includes('region')) return 'op-region'; return '';
-}
-function statusLabel(raw=''){
-  const s=String(raw).toLowerCase();
-  if(/available|disponible|libre|operative|operational/.test(s)) return 'Disponible';
-  if(/occupied|occupe|busy/.test(s)) return 'Occupée';
-  if(/out|indisponible|hors|fault|maintenance/.test(s)) return 'Indisponible';
-  return raw;
-}
-function sourceError(name){ return state.extras?.errors?.[name] ? `<div class="source-note">Source temporairement indisponible : ${esc(state.extras.errors[name])}</div>` : ''; }
-
-function renderSupplementary(){
-  const loading = state.extrasLoading && !state.extras;
-  if(loading){
-    for(const id of ['tad','interurban','longDistance','carpool','parking','charging']) if($("#"+id)) $("#"+id).innerHTML='<div class="empty">Chargement des données publiques…</div>';
-    return;
-  }
-  const x=state.extras||{};
-  const tad=x.tad;
-  const locality=tad?.locality||x.locality||'votre secteur';
-  if($('#tadTitle')) $('#tadTitle').textContent=`Transport à la demande à ${locality}`;
-  if($('#tadLabel')) $('#tadLabel').textContent=tad?.provider||'sur réservation';
