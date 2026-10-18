@@ -8,6 +8,17 @@ import GtfsRealtimeBindings from 'gtfs-realtime-bindings';
 const app = express();
 const PORT = process.env.PORT || 3000;
 
+app.use((req, res, next) => {
+  const origin = req.headers.origin || '';
+  const allowed = origin === 'https://trmouv.github.io' || origin === '';
+  if (allowed) res.setHeader('Access-Control-Allow-Origin', origin || '*');
+  res.setHeader('Vary', 'Origin');
+  res.setHeader('Access-Control-Allow-Methods', 'GET,OPTIONS');
+  res.setHeader('Access-Control-Allow-Headers', 'Content-Type');
+  if (req.method === 'OPTIONS') return res.sendStatus(204);
+  next();
+});
+
 const GTFS_STATIC_URL = 'https://www.data.gouv.fr/api/1/datasets/r/021fd4a3-ba9a-4d78-aa65-71d4d289f389';
 const GTFS_RT_URL = 'https://proxy.transport.data.gouv.fr/resource/mobius-angouleme';
 const BIKE_INFO_URL = 'https://gbfs.partners.fifteen.eu/gbfs/2.2/angouleme/en/station_information.json';
