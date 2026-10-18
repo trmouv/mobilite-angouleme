@@ -16,4 +16,12 @@
     }
     return nativeFetch(input, init);
   };
+
+  if ('serviceWorker' in navigator) {
+    const nativeRegister = navigator.serviceWorker.register.bind(navigator.serviceWorker);
+    navigator.serviceWorker.register = (scriptURL, options) => {
+      if (scriptURL === '/sw.js') scriptURL = './sw.js';
+      return nativeRegister(scriptURL, options);
+    };
+  }
 })();
